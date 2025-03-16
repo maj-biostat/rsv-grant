@@ -18,7 +18,7 @@ library(data.table)
 library(ggplot2)
 library(parallel)
 
-
+set.seed(92818785)
 # Simulation controls
 n_sim <- 10000
 
@@ -33,6 +33,8 @@ ve <- 1-(p_1/p_0)
 
 
 N_per_arm <- 1500
+
+mc_cores <- 60
 ```
 
 ## Background
@@ -64,8 +66,8 @@ Options:
   + death
   + medical attendance for respiratory tract infection
   + medical attendance for respiratory tract infection + RSV positive test
-  + severe respiratory tract infection + RSV positive test
   + hospitalised for respiratory tract infection + RSV positive test
+  + hospitalised for severe respiratory tract infection + RSV positive test
 
 ### Estimand
 
@@ -181,7 +183,7 @@ res <- mclapply(1:n_sim, function(i){
     pr_ve_gt_delta = pr_ve_gt_delta)
   
   
-}, mc.cores = 5)
+}, mc.cores = mc_cores)
 
 m_res <- do.call(rbind, res)
 
@@ -232,34 +234,12 @@ ggplot(d_fig_1, aes(x = x_ve, y = win_ve)) +
 
 ### Historic controls
 
-Incorporating historic controls directly falls under the power-prior approach.
-There are many ways to implement power-priors, @Ibrahim2015.
-
-With only a single trial, we have negligible data to inform the distribution of results on RSVpreF at 360 days.
-Therefore, the results are highly dependent on whether the current trial aligns with the historic trial along with the assumptions we make about the trial to trial variability of risk on the RSVpreF arm.
-
-The estimated risk on the RSVpreF arm in both the historic and current trial will be pulled towards one another.
-If the historic data for the RSVpreF arm is associated with a lower risk, then the current data will be pulled towards this lower value and vice versa.
-In the former case, the power will be impeded, in the latter case, we will see an increase in the power.
-
-For example, think about a specific case where we look at the risk difference.
-Assume that the true $p_0 = 0.05$ but the historic control says $p_h = 0.02$. 
-At the same time assume that $p_1 = 0.03$.
-With no pooling $rd = p_1 - p_0 = 0.03 - 0.05 = -0.02$ but when we partially pool the control arm, we will end up with something more like $rd = p_1 - p_0 = 0.03 - 0.04 = -0.01$ because the $p_0$ arm has been pulled towards $p_h = 0.02$.
-Demonstration below.
-
-```{r}
-#| class-output: stan
-#| code-fold: true
-
-cat(readLines("./stan/historic-control-1.stan"), sep = "\n")
-```
-
 
 ```{r}
 #| echo: false
+#| code-fold: true
 
-m1 <- cmdstanr::cmdstan_model("./stan/historic-control-1.stan")
+m1 <- cmdstanr::cmdstan_model("../stan/historic-control-1.stan")
 ```
 
 ```{r}
@@ -267,7 +247,7 @@ m1 <- cmdstanr::cmdstan_model("./stan/historic-control-1.stan")
 #| code-summary: Configuring inputs for simulation
 #| code-fold: true
     
-n_sim <- 1000
+n_sim <- 2500
 
 # Only look at subset of original p_1
 p_1_sub <- quantile(p_1, probs = c(0, 0.25, 0.5, 0.75, 1))
@@ -291,13 +271,49 @@ j = 1
 rd_sub <- p_1_sub - p_0
 ve_sub <- 1-(p_1_sub/p_0)
 
-N_ctl <- 1000
-N_trt <- 2000
+N_ctl <- 1500
+N_trt <- 1500
 ```
+
+Incorporating historic controls can be down within a power-prior framework.
+There are lots of ways to implement power-priors, @Ibrahim2015.
+Here, the partial pooling approach is used:
+
+$$
+\begin{aligned}
+Y_0 &\sim \text{Bin}(n_0, p_0) \quad \text{Current control arm RSVpreF} \\
+Y_1 &\sim \text{Bin}(n_1, p_1) \quad \text{Current treatment arm IG} \\
+
+Y_h &\sim \text{Bin}(n_h, p_h) \quad \text{Historic data for RSVpreF from trial } h \\
+\text{logit}(p_0), \text{logit}(p_h) &\sim \text{N}(\mu, \tau) \quad \text{Common distribution for controls}\\
+\mu &\sim \text{Normal}(\text{logit}(0.05), 0.25) \\
+\tau &\sim \text{Exp}(3) \\
+p_1 &\sim \text{Beta}(0.5, 9.5)
+\end{aligned}
+$$
+
+meaning $\mu$ and $\tau$ represent the between study mean and SD. 
+When $\tau$ is small, all the logits are similar, so it is appropriate to leverage historic information.
+When $\tau$ is large, we have observed high variability in the control rate and thus we do not want to incorporate much of the earlier data.
+Quantities such as risk difference and VE are then derived as functions of the above.
+
+With only a single trial, we have negligible data to inform the distribution of results on RSVpreF at 360 days.
+Therefore, the results are highly dependent on whether the current trial aligns with the historic trial along with the assumptions we make about the trial to trial variability of risk on the RSVpreF arm.
+
+The estimated risk on the RSVpreF arm in both the historic and current trial will be pulled towards one another.
+If the historic data for the RSVpreF arm is associated with a lower risk, then the current data will be pulled towards this lower value and vice versa.
+In the former case, power will usually be impeded, in the latter case, power will usually increase.
+
+For example, think about a specific case where we look at the risk difference.
+Assume that the true $p_0 = 0.05$ but the historic control says $p_h = 0.02$. 
+At the same time assume that $p_1 = 0.03$.
+With no pooling $rd = p_1 - p_0 = 0.03 - 0.05 = -0.02$ but when we partially pool the control arm, we will end up with something more like $rd = p_1 - p_0 = 0.03 - 0.04 = -0.01$ because the $p_0$ arm has been pulled towards $p_h = 0.02$.
+Demonstration below (simulated trials `r n_sim` for scenarios with $p_0$ set as before and $p_1$ set to `r paste0(p_1_sub, collapse = ", ")`.
+An informative prior was put on the risk under IG that aligns with a belief that there is a 95% chance that the risk of the outcome is lower than 20%.
 
 ```{r}
 #| label: historic-ctl-sim-1
-#| code-summary: Function to run simulation based on single historic control 
+#| code-summary: Simulation implementation based on single historic control 
 #| code-fold: true
 
 # only supports a single historic control for the moment because that
@@ -337,16 +353,16 @@ sim_historic_control <- function(yh = 92, nh = 3495){
         pri_pt = c(alpha(mu, nu), beta(mu, nu))
       )
     
-      # f1 <- m1$sample(
-      #   ld, iter_warmup = 1000, iter_sampling = 2000,
-      #   parallel_chains = 1, chains = 1, refresh = 0, show_exceptions = T,
-      #   max_treedepth = 10, adapt_delta = 0.99)
+      f1 <- m1$sample(
+        ld, iter_warmup = 1000, iter_sampling = 2000,
+        parallel_chains = 1, chains = 1, refresh = 0, show_exceptions = T,
+        max_treedepth = 10, adapt_delta = 0.99)
       
-      snk <- capture.output(
-        f1 <- m1$pathfinder(ld, num_paths=20, single_path_draws=200,
-                            history_size=50, max_lbfgs_iters=100,
-                            refresh = 0, draws = 2000)
-        )
+      # snk <- capture.output(
+      #   f1 <- m1$pathfinder(ld, num_paths=20, single_path_draws=200,
+      #                       history_size=50, max_lbfgs_iters=100,
+      #                       refresh = 0, draws = 2000)
+      #   )
     
       d_tmp <- data.table(f1$summary(
         variables = c("rd"),
@@ -362,7 +378,7 @@ sim_historic_control <- function(yh = 92, nh = 3495){
       
       c(win_rd = win_rd, win_ve = win_ve)
       
-    }, mc.cores = 5)
+    }, mc.cores = mc_cores)
     
     pwr <- colMeans(data.table(do.call(rbind, res)))
     d_res[j, pwr_rd := pwr[1]]
@@ -377,8 +393,8 @@ d_fig_2a <- copy(sim_historic_control())
 d_fig_2b <- copy(sim_historic_control(yh = 175, nh = 3495))
 
 d_fig_2 <- rbind(
-  cbind(data.table(p_h = sprintf("%.1f", 100*92/3495)), d_fig_2),
-  cbind(data.table(p_h = sprintf("%.1f", 100*175/3495)), d_fig_3)
+  cbind(data.table(p_h = sprintf("%.1f%%", 100*92/3495)), d_fig_2a),
+  cbind(data.table(p_h = sprintf("%.1f%%", 100*175/3495)), d_fig_2b)
 )
 
 ```
@@ -388,12 +404,12 @@ d_fig_2 <- rbind(
 ```{r}
 #| echo: FALSE
 #| label: fig-pwr_2_rd
-#| fig-cap: 'Power curves characterising power by effect size (risk difference) showing impact when historic control is lower and when the historic control is aligned with the present data. Treatment to control sample size was also weight 2:1'
+#| fig-cap: 'Power curves characterising power by effect size (risk difference) showing impact when historic control is lower and when the historic control is aligned with the present data.'
 #| fig.height: 4.5
 #| fig.width: 4.5
 #| fig-pos: H
 
-
+tit <- sprintf("Power curve (N_trt = %.0f, N_ctl = %.0f)", N_trt, N_ctl)
 ggplot(d_fig_1, aes(x = x_rd, y = win_rd)) +
   geom_smooth(se = F, lwd = 0.3, col = 1, 
               method = "gam", formula = y ~ s(x, bs = "ps")) +
@@ -404,9 +420,173 @@ ggplot(d_fig_1, aes(x = x_rd, y = win_rd)) +
   scale_x_continuous("Risk difference (p1-p0)", breaks = seq(-0.02, 0.05, by = 0.01)) +
   scale_color_discrete("Risk in historic study for RSVpreF") +
   theme_minimal() +
-  theme(legend.position = "bottom")
+  theme(legend.position = "bottom") +
+  ggtitle(tit)
 ```
 
+
+
+
+### Alternative approaches
+
+
+```{r}
+#| echo: false
+#| code-fold: true
+
+m3 <- cmdstanr::cmdstan_model("./stan/ordinal-02.stan")
+```
+
+```{r}
+#| label: ordinal-data
+#| code-summary: Data generation for ordinal outcome definition 
+#| code-fold: true
+
+# Define categories and probabilities under standard treatment
+cats <- c(
+  "death - all cause", 
+  "hosp - rti rsv confirmed", 
+  "hosp - all cause rti", 
+  "MA - rti rsv confirmed", 
+  "MA - all cause rti", 
+  "No MA - for all cause rti")
+
+# only supports a single historic control for the moment because that
+# is all we have.
+get_ordinal_data <- function(
+    N = 3000, 
+    or_new_trt = 0.7,
+    # death, hosp rsv, hosp rti, ma rsv, ma rti, no ma for rti
+    p_soc = c(0.02, 0.03, 0.03, 0.05, 0.6, 0.27) 
+    ){
+  
+  cum_p_soc <- cumsum(p_soc)  
+  # Logit transformation of cumulative probabilities for standard treatment
+  lo_cum_probs_soc <- qlogis(cum_p_soc[-length(cum_p_soc)])
+
+
+  # Adjust logit cumulative probabilities for new treatment
+  lo_cum_p_new <- lo_cum_probs_soc + log(or_new_trt)
+  cum_p_new <- plogis(lo_cum_p_new)
+  cum_p_new <- c(cum_p_new, 1)  # Ensure last category is 1
+  p_new <- diff(c(0, cum_p_new))  # Convert back to category probabilities
+
+  # 1:1 allocation
+  trt <- rep(c("SoC", "New"), each = N / 2)
+  p_mat <- rbind(p_soc, p_new)
+    
+  outcomes <- unlist(lapply(1:length(trt), function(i) {
+    sample(cats, 1, prob = p_mat[(trt[i] == "New") + 1, ])
+  }))
+    
+  data.table(trt, outcome = factor(outcomes, levels = rev(cats)))
+
+}
+
+# N <- 3000
+# d_trial <- get_ordinal_data(N, or_new_trt)
+# d_smry <- d_trial[, .(p_obs = .N/(N/2)), keyby = .(trt, outcome)]
+# d_smry <- cbind(d_smry, p_tru = c(rev(p_new), rev(p_soc)))
+# d_smry
+```
+
+```{r}
+#| label: ordinal-sim-1
+#| code-summary: Simulation implementation based on ordinal outcome definition 
+#| code-fold: true
+
+risk_diff_on_po_opt <- function(or_new_trt, rd_target){
+  cum_p_soc <- cumsum(p_soc)  
+  # Logit transformation of cumulative probabilities for standard treatment
+  lo_cum_probs_soc <- qlogis(cum_p_soc[-length(cum_p_soc)])
+
+
+  # Adjust logit cumulative probabilities for new treatment
+  lo_cum_p_new <- lo_cum_probs_soc + log(or_new_trt)
+  cum_p_new <- plogis(lo_cum_p_new)
+  cum_p_new <- c(cum_p_new, 1)  # Ensure last category is 1
+  p_new <- diff(c(0, cum_p_new))  # Convert back to category probabilities
+  
+  (rd_target - (p_new[4] - p_soc[4]))^2
+}
+
+# Compute the ORs that are consistent with risk differences that we 
+# have looked at previously.
+or_new_trt <- numeric(length(p_1_sub))
+for(i in seq_along(p_1_sub)){
+  
+  or_new_trt[i] <- optimize(
+    risk_diff_on_po_opt, 
+    c(0, 10), tol = 0.0001, 
+    rd_target = p_1_sub[i] - p_0)$minimum
+  
+}
+
+# sanity check
+# cum_p_soc <- cumsum(p_soc)  
+# # Logit transformation of cumulative probabilities for standard treatment
+# lo_cum_probs_soc <- qlogis(cum_p_soc[-length(cum_p_soc)])
+# # Adjust logit cumulative probabilities for new treatment
+# lo_cum_p_new <- lo_cum_probs_soc + log(or_new_trt[5])
+# cum_p_new <- plogis(lo_cum_p_new)
+# cum_p_new <- c(cum_p_new, 1)  # Ensure last category is 1
+# p_new <- diff(c(0, cum_p_new))  # Convert 
+# rbind(p_new, p_soc)
+# round(p_new[4] -  p_soc[4], 4)
+# p_1_sub - p_0
+
+
+sim_ordinal <- function(){
+  
+  # to store results
+  d_res <- data.table(
+    rd = rd_sub, 
+    pwr_rd = NA_real_
+  )
+  
+  j <- 1
+  for(j in seq_along(or_new_trt)){
+    
+    res <- mclapply(1:n_sim, function(i){
+      
+      d_trial <- get_ordinal_data(N = 3000, or_new_trt[j])
+      # counts by groups
+      d_trial_agg <- d_trial[, .N, keyby = .(trt, outcome)]
+
+      ld <- list(
+        N = nrow(d_trial_agg),
+        K = length(cats),
+        P = 1,
+        y = as.integer(d_trial_agg$outcome),
+        X = as.matrix(as.numeric(d_trial_agg$trt == "New"), ncol = 1, drop = F ),
+        wgt = d_trial_agg$N
+      )
+      
+      f3 <- m3$sample(
+        ld, iter_warmup = 1000, iter_sampling = 2000,
+        parallel_chains = 1, chains = 1, refresh = 0, show_exceptions = F,
+        max_treedepth = 10, adapt_delta = 0.99)
+
+
+      d_tmp <- data.table(f3$summary(
+        variables = c("rd"),
+        prob_dec = ~ mean(. < 0)))
+      
+      win_rd <- d_tmp[variable == "rd", prob_dec > 0.975]
+
+      c(win_rd = win_rd)
+      
+    }, mc.cores = mc_cores)
+    
+    pwr <- colMeans(data.table(do.call(rbind, res)))
+    d_res[j, pwr_rd := pwr[1]]
+    
+  }
+  d_res
+}
+
+
+```
 
 
 
