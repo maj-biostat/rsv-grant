@@ -1,0 +1,420 @@
+---
+title: "Simulation - RSV study evaluating RSVpreF vs IG"
+author: "maj"
+date: "2024-11-13"
+date-modified: last-modified
+bibliography: refs.bib
+csl: biomed-central.csl
+embed-resources: true
+---
+
+```{r}  
+#| label: setup
+#| code-summary: Libraries and globals
+#| code-fold: true
+
+suppressWarnings(suppressPackageStartupMessages(library(cmdstanr)))
+library(data.table)
+library(ggplot2)
+library(parallel)
+
+
+# Simulation controls
+n_sim <- 10000
+
+# Assume somewhat higher risk on the RSVpreF arm than observed in the MATISSE study
+p_0 <- 0.05
+
+p_1 <- p_0 + seq(-0.025, 0.025, len = n_sim)
+
+# Effects based on risk difference and/or VE
+rd <- p_1 - p_0
+ve <- 1-(p_1/p_0)
+
+
+N_per_arm <- 1500
+```
+
+## Background
+
+### Aim
+
+We 
+
+
+### Interventions
+
+
+### Randomisation
+
+
+### Primary outcome
+
+Options:
+
++ binary outcome variable indicating medically attended per the definition of MATISSE study:
+
+  + MA-RTI visit AND RSV-positive test result AND one or more of the following
+    + Fast breathing (RR $\ge 60$  bpm for $<2$  months of age [$<60$ days of age], $\ge 50$ bpm for $2 - <12$ months of age, or $\ge 40$ bpm for 12–24 months of age)
+    + SpO2 $<95%$
+    + Chest wall indrawing
+
++ ordinal variable indicating health state at each follow up:
+
+  + death
+  + medical attendance for respiratory tract infection
+  + medical attendance for respiratory tract infection + RSV positive test
+  + severe respiratory tract infection + RSV positive test
+  + hospitalised for respiratory tract infection + RSV positive test
+
+### Estimand
+
+Primary: population perspective, i.e. the estimated comparative effectiveness of each implemented strategy with adherence as observed under real-world conditions.
+
+### Follow up
+
+Follow up to age 360 days for both groups.
+
+### Prior information
+
+MATISSE study (run during COVID-19) is the primary source of information for day 360 outcomes for RSVpreF (maternal vaccine).
+For the medically attended lower RTI with RSV positive test (RSV-MA-LRTI, see Tables S1 and S6 in MATISSE supplementary authored by Kampmann, i.e. interim analysis), there were $92/3495 \approx 2.6%$ cases on RSVpreF arm and $156/3480 \approx 4.5%$ cases on the placebo arm, $VE \approx 0.41$ at day 360.
+
+No day 360 data available for immunoprophylaxis (nirsevimab).
+
+### Constraints
+
+Sample size up to approximately 3000 dyads.
+
+## Methods
+
+A high-level description of the analysis options include:
+
++ Conjugate beta binomial analysis comparing the number of binary events by arm at a cross sectional timepoint (e.g. 360 days)
++ Leverage historical controls via partial pooling
++ Logistic regression comparing the number of binary events by arm adjusting for prognostic covariates
++ Longitudinal analysis 
+
+
+## Operating characteristics
+
+### Reference design
+
+As a reference design, assume the least informative binary indicator with single analysis at maximum sample size (3000 dyads).
+
+Analysis based on conjugate beta binomial model.
+
+Consider two possible trial conclusion criteria, tailored dependening on what is more relevant.
+These are arbitrary and applied indepdently, just to motivate discussion.
+
+1. Conclude that IG is more effective if there is a 97.5% (or higher) probability that it reduces the risk of MA-RTI relative to the RSVpreF arm. That is, $Pr(p_1 < p_0) > 0.975 \implies \text{trial success}$. The control arm (RSVpreF) is assumed to have an event risk of $p_0 = 0.05$ and the IG group event risk $p_1 \in \{x : 0.025 \le x \le 0.075\}$ where values lower than $p_0$ imply benefit associated with IG relative to RSVpreF.
+2. Conclude that IG is more effective if there is a 90% (or higher) probability that the VE, defined as 1 - RR, is above 20%. That is, $Pr(1 - (p_1 / p_0) > 0.2) > 0.9 \implies \text{trial success}$. VE is computed from the same values nominated as above. When evaluating two active vaccines, it is possible for VE to be less than zero, e.g. when the interventional arm increases risk, $p_1 > p_0$. This approach is simply stating that there needs to be some minimal non-zero effect present, but does not require such a stringent decision criteria.
+
+The power curve is based on interpolating the results from `r n_sim` simulated trials.
+
+```{r}
+#| label: oc-1
+#| code-summary: Operating characteristics for least efficient design
+#| code-fold: true
+    
+    
+y_0 <- rbinom(n_sim, N_per_arm, p_0)
+y_1 <- rbinom(n_sim, N_per_arm, p_1)
+
+i <- 1
+
+# Define the function to integrate
+integrand_1 <- function(
+    x, alpha_0, beta_0,
+    alpha_1, beta_1) {
+  pbeta(x, alpha_0, beta_0) * dbeta(x, alpha_1, beta_1)
+}
+  
+# Say we are interested in VE  = 1 - (p1/p0) and specifically in the probability
+# that Pr(VE > 0.2) = Pr(1 - p1/p0 > 0.2) = Pr(p1/p0 < 0.8).
+
+# We need to integrate over all possible values of p_0 and p_1 considering only the
+# cases where p_1/p_0 < 0.8. So we need a double integral
+# Pr(p1/p0 < 0.8) = \int_0^1 \int_0^{0.8p_0} f_1(p_1) f_0(p_0) dp_1 dp_0
+# This integral accumulates the probability that, given fixed p_0, p_1 falls below 
+# 0.8 * p_0
+integrand_2 <- function(
+    p0, alpha_0, beta_0,
+    alpha_1, beta_1, delta = 0) {
+  sapply(p0, function(p0_val) {
+    integrate(function(p1) dbeta(p1, alpha_1, beta_1), 
+              lower = 0, 
+              upper = delta * p0_val)$value * dbeta(p0_val, alpha_0, beta_0)
+  })
+}
+
+res <- mclapply(1:n_sim, function(i){
+  
+  # i = sample(1:n_sim, 1)
+  # Evaluate whether risk of event is lower on IG arm
+  pr_1_lt_0 <- integrate(
+    integrand_1, lower = 0, upper = 1,
+    alpha_0 = y_1[i] + 1 , 
+    beta_0 = N_per_arm - y_1[i] + 1 ,
+    alpha_1 = y_0[i] + 1, 
+    beta_1 = N_per_arm - y_0[i] + 1)$value
+  
+  pr_ve_gt_delta <- integrate(
+    integrand_2, lower = 0, upper = 1,
+    alpha_0 = y_0[i] + 1  , 
+    beta_0 = N_per_arm - y_0[i] + 1 ,
+    alpha_1 = y_1[i] + 1, 
+    beta_1 = N_per_arm - y_1[i] + 1,
+    delta = 1 - 0.2)$value
+  
+  # p_post_0 <- rbeta(1e5, y_0[i] + 1, N_per_arm - y_0[i] + 1)
+  # p_post_1 <- rbeta(1e5, y_1[i] + 1, N_per_arm - y_1[i] + 1)
+  # c(pr_1_lt_0_int, mean(p_post_1 < p_post_0))
+  # ve <- 1 - (p_post_1/p_post_0)
+  # c(pr_ve_gt_delta, mean(ve > 0.2))
+  
+  # # equivalent to testing risk difference against null hypothesis of zero
+  # pr_1_lt_0_approx <- mean(p_post_1 < p_post_0)
+  
+  # assume a typical frequentist critria
+  c(pr_1_lt_0 = pr_1_lt_0, 
+    pr_ve_gt_delta = pr_ve_gt_delta)
+  
+  
+}, mc.cores = 5)
+
+m_res <- do.call(rbind, res)
+
+d_fig_1 <- data.table(
+  x_rd = rd,
+  x_ve = ve,
+  win_rd = as.numeric(m_res[, 1] > 0.975),
+  win_ve = as.numeric(m_res[, 2] > 0.9)
+)
+```
+
+```{r}
+#| echo: FALSE
+#| label: fig-pwr_1_rd
+#| fig-cap: 'Power curves characterising power by effect size (risk difference) at a sample size of 1500 per arm in two group study with binary outcome'
+#| fig.height: 4.5
+#| fig.width: 4.5
+#| fig-pos: H
+
+
+ggplot(d_fig_1, aes(x = x_rd, y = win_rd)) +
+  geom_smooth(se = F, lwd = 0.3, col = 1, 
+              method = "gam", formula = y ~ s(x, bs = "ps")) +
+  scale_y_continuous("Power", breaks = seq(0, 1, by = 0.1)) +
+  scale_x_continuous("Risk difference (p1-p0)", breaks = seq(-0.02, 0.05, by = 0.01)) +
+  theme_minimal()
+```
+
+
+```{r}
+#| echo: FALSE
+#| label: fig-pwr_1_ve
+#| fig-cap: 'Power curves characterising power by effect size (vaccine effectiveness) at a sample size of 1500 per arm in two group study with binary outcome'
+#| fig.height: 4.5
+#| fig.width: 4.5
+#| fig-pos: H
+
+
+ggplot(d_fig_1, aes(x = x_ve, y = win_ve)) +
+  geom_smooth(se = F, lwd = 0.3, col = 1, 
+              method = "gam", formula = y ~ s(x, bs = "ps")) +
+  scale_y_continuous("Power", breaks = seq(0, 1, by = 0.1)) +
+  scale_x_continuous("Vaccine effectiveness (1 - RR)", breaks = seq(-1, 0.4, by = 0.2)) +
+  theme_minimal()
+```
+
+
+
+### Historic controls
+
+Incorporating historic controls directly falls under the power-prior approach.
+There are many ways to implement power-priors, @Ibrahim2015.
+
+With only a single trial, we have negligible data to inform the distribution of results on RSVpreF at 360 days.
+Therefore, the results are highly dependent on whether the current trial aligns with the historic trial along with the assumptions we make about the trial to trial variability of risk on the RSVpreF arm.
+
+The estimated risk on the RSVpreF arm in both the historic and current trial will be pulled towards one another.
+If the historic data for the RSVpreF arm is associated with a lower risk, then the current data will be pulled towards this lower value and vice versa.
+In the former case, the power will be impeded, in the latter case, we will see an increase in the power.
+
+For example, think about a specific case where we look at the risk difference.
+Assume that the true $p_0 = 0.05$ but the historic control says $p_h = 0.02$. 
+At the same time assume that $p_1 = 0.03$.
+With no pooling $rd = p_1 - p_0 = 0.03 - 0.05 = -0.02$ but when we partially pool the control arm, we will end up with something more like $rd = p_1 - p_0 = 0.03 - 0.04 = -0.01$ because the $p_0$ arm has been pulled towards $p_h = 0.02$.
+Demonstration below.
+
+```{r}
+#| class-output: stan
+#| code-fold: true
+
+cat(readLines("./stan/historic-control-1.stan"), sep = "\n")
+```
+
+
+```{r}
+#| echo: false
+
+m1 <- cmdstanr::cmdstan_model("./stan/historic-control-1.stan")
+```
+
+```{r}
+#| label: setup2
+#| code-summary: Configuring inputs for simulation
+#| code-fold: true
+    
+n_sim <- 1000
+
+# Only look at subset of original p_1
+p_1_sub <- quantile(p_1, probs = c(0, 0.25, 0.5, 0.75, 1))
+
+# Prior for treatment group (IG)
+# Convert beta parameterisation from mean and sample size to a and b
+alpha <- function(mu, nu){
+  mu * nu
+} 
+beta <- function(mu, nu){
+  (1-mu)*nu
+}
+
+# set mean to 
+mu <- 0.05
+nu <- 10.05
+
+j = 1
+
+# Effects based on risk difference and/or VE
+rd_sub <- p_1_sub - p_0
+ve_sub <- 1-(p_1_sub/p_0)
+
+N_ctl <- 1000
+N_trt <- 2000
+```
+
+```{r}
+#| label: historic-ctl-sim-1
+#| code-summary: Function to run simulation based on single historic control 
+#| code-fold: true
+
+# only supports a single historic control for the moment because that
+# is all we have.
+sim_historic_control <- function(yh = 92, nh = 3495){
+  
+  # to store results
+  d_res <- data.table(
+    rd = rd_sub, ve = ve_sub,
+    pwr_rd = NA_real_, pwr_ve = NA_real_
+  )
+  
+  for(j in seq_along(p_1_sub)){
+    
+    y_0 <- rbinom(n_sim, N_ctl, p_0)
+    y_1 <- rbinom(n_sim, N_trt, p_1_sub[j])
+    
+    res <- mclapply(1:n_sim, function(i){
+      
+      ld <- list(
+        n0 = N_ctl, y0 = y_0[i], 
+        nt = N_trt, yt = y_1[i],
+        
+        H = 1,
+        yh = yh, 
+        nh = nh,
+        
+        # centre at 5% with 2.5 to 10% being well within realms of possibility
+        # on the risk scale, converted to log odds scale
+        pri_mu = c(qlogis(0.05), 0.25),
+        pri_tau_rho = 3, 
+      
+        # Set the mean to 6% and the pre-existing sample size to 10
+        # This is consistent with a 95% probability that the risk on IG at 360 days
+        # is less than 20% and a 99% probability that the risk on IG at 360 is less
+        # that 32%
+        pri_pt = c(alpha(mu, nu), beta(mu, nu))
+      )
+    
+      # f1 <- m1$sample(
+      #   ld, iter_warmup = 1000, iter_sampling = 2000,
+      #   parallel_chains = 1, chains = 1, refresh = 0, show_exceptions = T,
+      #   max_treedepth = 10, adapt_delta = 0.99)
+      
+      snk <- capture.output(
+        f1 <- m1$pathfinder(ld, num_paths=20, single_path_draws=200,
+                            history_size=50, max_lbfgs_iters=100,
+                            refresh = 0, draws = 2000)
+        )
+    
+      d_tmp <- data.table(f1$summary(
+        variables = c("rd"),
+        prob_dec = ~ mean(. < 0)))
+      
+      win_rd <- d_tmp[variable == "rd", prob_dec > 0.975]
+      
+      d_tmp <- data.table(f1$summary(
+        variables = c("ve"),
+        prob_dec = ~ mean(. > 0.2)))
+      
+      win_ve <- d_tmp[variable == "ve", prob_dec > 0.9]
+      
+      c(win_rd = win_rd, win_ve = win_ve)
+      
+    }, mc.cores = 5)
+    
+    pwr <- colMeans(data.table(do.call(rbind, res)))
+    d_res[j, pwr_rd := pwr[1]]
+    d_res[j, pwr_ve := pwr[2]]
+    
+  }
+  d_res
+}
+
+
+d_fig_2a <- copy(sim_historic_control())
+d_fig_2b <- copy(sim_historic_control(yh = 175, nh = 3495))
+
+d_fig_2 <- rbind(
+  cbind(data.table(p_h = sprintf("%.1f", 100*92/3495)), d_fig_2),
+  cbind(data.table(p_h = sprintf("%.1f", 100*175/3495)), d_fig_3)
+)
+
+```
+
+
+
+```{r}
+#| echo: FALSE
+#| label: fig-pwr_2_rd
+#| fig-cap: 'Power curves characterising power by effect size (risk difference) showing impact when historic control is lower and when the historic control is aligned with the present data. Treatment to control sample size was also weight 2:1'
+#| fig.height: 4.5
+#| fig.width: 4.5
+#| fig-pos: H
+
+
+ggplot(d_fig_1, aes(x = x_rd, y = win_rd)) +
+  geom_smooth(se = F, lwd = 0.3, col = 1, 
+              method = "gam", formula = y ~ s(x, bs = "ps")) +
+  geom_point(data = d_fig_2,
+             aes(x = rd, y = pwr_rd, col = p_h),
+             inherit.aes = F) +
+  scale_y_continuous("Power", breaks = seq(0, 1, by = 0.1)) +
+  scale_x_continuous("Risk difference (p1-p0)", breaks = seq(-0.02, 0.05, by = 0.01)) +
+  scale_color_discrete("Risk in historic study for RSVpreF") +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+```
+
+
+
+
+
+<!-- ::: {#refs} -->
+<!-- ::: -->
+
+
+
+
+

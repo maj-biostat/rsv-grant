@@ -1,0 +1,159 @@
+---
+title: "RSV study evaluating RSVpreF vs IG"
+author: "maj"
+date: "2024-11-13"
+date-modified: last-modified
+bibliography: refs.bib
+csl: biomed-central.csl
+embed-resources: true
+---
+
+```{r}
+#| label: libs
+#| code-summary: Libraries and globals
+
+suppressWarnings(suppressPackageStartupMessages(library(cmdstanr)))
+library(data.table)
+library(ggplot2)
+```
+
+Dynamic borrowing approach can incorporate information from historic controls while accomodating the potential for drift between the baseline risk estimated in the current study and the risks observed in previous studies.
+
+Assume two-arm trial, binary outcome. 
+Let, $p_0$ be the control arm estimated using the current data and let $p_1, \dots, p_H$ be the response rates in the $H$ historical stides where $H$ could be 1.
+Assume that the log-odds of the control rates arise from a common distribution:
+
+$$
+\begin{aligned}
+Y_0 &\sim \text{Bin}(n_0, p_0) \\
+Y_1 &\sim \text{Bin}(n_1, p_1) \\
+\dots \\
+Y_H &\sim \text{Bin}(n_K, p_H) \\
+\text{logit}(p_0), \text{logit}(p_1), \dots, \text{logit}(p_H) &\sim \text{N}(\mu, \tau) \\
+\end{aligned}
+$$
+
+meaning $\mu$ and $\tau$ represent the between study mean and SD. 
+When $\tau$ is small, all the logits are similar, so it is appropriate to leverage historic information.
+When $\tau$ is large, we have observed high variability in the control rate and thus we do not want to incorporate much of the earlier data.
+
+$$
+\begin{aligned}
+\mu &\sim \text{Logistic}(0, 1) \\
+\tau &\sim \text{Exp}(\rho)
+\end{aligned}
+$$
+
+To complete the model, let $p_T$ denote the response rate in the treatment arm with:
+
+$$
+\begin{aligned}
+Y_T &\sim \text{Bin}(n_T, p_T) \\
+\text{logit}(p_T) &= \text{logit}(p_0) + \phi \\
+\phi &\sim \text{N}(0, 2) \\
+\end{aligned}
+$$
+
+such that $\theta = \exp(\phi)$ denotes the (OR) treatment effect, alternatively represent as risk difference, relative risk etc.
+
+Kampmann reports that 3570 (2830 completed follow-up to 6 months) infants were evaluated on the vaccine arm of the trial with 57 having medical attendance for RSV lower respiratory tract infection within 180 days after birth @Kampmann2023.
+Figure 2B states 3495 as the denominator; I haven't looked into why there is a discrepency. 
+Simoes reports between 8/405 meeting the case definition of RSV associated LRTI @Simoes2022.
+
+> Note that at approx 2%, these are below the 10% assumed in the grant application, presumably because we adopted all-cause acute respiratory illness as the outcome that power was based on. I am not sure if the all-cause details are available from the other studies but assume they are 330 for the Kampmann study and 50 for the Simoes study.
+
+Assume that we aim to leverage these two studies, plus the data we observe in the current RSV study.
+We have historic controls suggesting outcome risks around `r sprintf("%.0f%%", 100 * 330/3570)` and `r sprintf("%.0f%%", 100 * 50/405)`.
+
+Given the availability of control data, there may be some merit in randomising at something other than 1:1.
+However, note that this is only the case if we are confident the control data is indicative of what we expect to see.
+If this is unlikely, then there will be limited benefit to the controls due to the drift and so something other than 1:1 needs to be understood as a risk, adaptive randomisation may have some merit.
+Also note that there is not a lot of information to inform the variance component.
+
+Assume we observe a risk of 10% in our control and assume that the IG arm has a risk in the order of 7-8% and that we have 2500 units to work with.
+
+```{r}
+#| label: data
+#| code-summary: Trial data
+
+
+N <- 2500
+n_0 <- 750
+n_t <- N - n_0
+p_0 <- 0.1
+
+p_t <- plogis(qlogis(p_0) + log(0.65))
+  
+# kampmann
+p_1 <- 330/3570
+# simoes
+p_2 <- 50/405
+
+y_0 <- rbinom(1, n_0, p_0)
+y_1 <- 330
+n_1 <- 3570
+
+y_2 <- 50
+n_2 <- 405
+
+y_t <- rbinom(1, n_t, p_t)
+```
+
+
+```{r}
+#| class-output: stan
+#| echo: false
+
+cat(readLines("../stan/logistic-02.stan"), sep = "\n")
+```
+
+
+```{r}
+#| echo: false
+
+
+m0 <- cmdstanr::cmdstan_model("../stan/logistic.stan")
+m1 <- cmdstanr::cmdstan_model("../stan/logistic-02.stan")
+```
+
+```{r}
+
+ld = list(
+  n0 = n_0, y0 = y_0, 
+  nt = n_t, yt = y_t,
+  
+  H = 2, 
+  yh = c(y_1, y_2),
+  nh = c(n_1, n_2)
+  )
+
+f1 <- m1$sample(
+  ld, iter_warmup = 1000, iter_sampling = 2000,
+  parallel_chains = 1, chains = 1, refresh = 0, show_exceptions = T,
+  max_treedepth = 10, adapt_delta = 0.99)
+
+f1$summary(variables = c("p0", "ph", "pt", "theta", "tau"))
+```
+
+Our underlying truth was a control risk of 10%, the MLE was `r sprintf("%.0f%%", 100 * y_0/n_0)` based on `r sprintf("%.0f", y_0)` events out of `r sprintf("%.0f", n_0)` trials.  
+We assumed a treatment arm risk of `r sprintf("%.3f", p_t)`, the MLE was `r sprintf("%.0f%%", 100 * y_t/n_t)` based on `r sprintf("%.0f", y_t)` events out of `r sprintf("%.0f", n_t)` trials.  
+
+Contrast with direct comparison:
+
+```{r}
+ld <- list(n = c(n_0, n_t), y = c(y_0, y_t))
+
+f0 <- m0$sample(
+  ld, iter_warmup = 1000, iter_sampling = 2000,
+  parallel_chains = 2, chains = 2, refresh = 0, show_exceptions = F,
+  max_treedepth = 13)
+
+f0$summary(variables = c("p0", "p1", "theta"))
+```
+
+where you might possibly see slightly less precision on the treatment effect although that is obviously highly dependent on what historic information we have available and how indicative it is of the current study.
+It would probably be wise to specify the new study in a way to ensure the best chance of comparable outcomes, albeit adjusted for a local situation.
+
+
+
+
