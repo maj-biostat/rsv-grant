@@ -591,8 +591,13 @@ for(i in seq_along(p_1_sub)){
   
 }
 
+rd_sub <- p_1_sub - p_0
+
 sim_ordinal <- function(){
   
+  
+  d_grid <- CJ(trt = c("SoC", "New"), outcome = cats)
+  d_grid[, outcome := factor(outcome, levels = cats)]
   
   l_res <- list()
   
@@ -602,12 +607,19 @@ sim_ordinal <- function(){
     l_res[[j]] <- mclapply(1:n_sim, function(i){
       
       d_trial <- get_ordinal_data(N = 3000, or_new_trt[j])
+      
       d_trial[trt == "New", x := 1]
       d_trial[trt == "SoC", x := 0]
       d_trial <- d_trial[order(x)]
-      # dcast(d_trial[, .N, keyby = .(trt, outcome)], outcome ~ trt, value.var = "N")
+      
       
       d_trial_grp <- d_trial[, .N, keyby = .(trt, x, outcome)]
+      # Accounting for chance that some groups have zero counts
+      d_trial_grp <- merge(d_trial_grp, d_grid, by = c("trt", "outcome"), all.y = T)
+      d_trial_grp[is.na(x) & trt == "New", x := 1]
+      d_trial_grp[is.na(x) & trt == "SoC", x := 0]
+      d_trial_grp[is.na(N), N := 0]
+      
       d_trial_grp[, p_obs := N / (nrow(d_trial)/2)]
       d_trial_grp <- d_trial_grp[order(x)]
       
@@ -623,19 +635,6 @@ sim_ordinal <- function(){
       d_trial_bin[trt == "SoC", x := 0]
       d_trial_bin <- d_trial_bin[order(x)]
       d_trial_bin[, p_obs := success/n]
-      
-      # ld <- list(
-      #   N = nrow(d_trial),
-      #   K = length(cats),
-      #   P = 1,
-      #   y = as.integer(d_trial$outcome),
-      #   X = as.matrix(d_trial$x, ncol = 1, drop = F )
-      # )
-      # 
-      # f3 <- m2$sample(
-      #   ld, iter_warmup = 1000, iter_sampling = 2000,
-      #   parallel_chains = 1, chains = 1, refresh = 0, show_exceptions = F,
-      #   max_treedepth = 10, adapt_delta = 0.99)
       
       ld <- list(
         N = nrow(d_trial_grp),
@@ -664,8 +663,6 @@ sim_ordinal <- function(){
         parallel_chains = 1, chains = 1, refresh = 0, show_exceptions = T,
         max_treedepth = 10, adapt_delta = 0.99)
       
-      # extract cuts and check.
-      
       d_tmp <- data.table(f4$draws(variables = c("p0", "p1"), format = "matrix"))
       d_post <- melt(d_tmp, measure.vars = names(d_tmp))
       d_post[, ix := gsub("p.\\[", "", variable, fixed = F)]
@@ -689,7 +686,7 @@ sim_ordinal <- function(){
       
       d_smry_p[, outcome := factor(outcome, levels = cats)]
       d_smry_p <- d_smry_p[order(outcome, x)]
-      d_smry_p
+      
       
       d_tmp <- data.table(f4$draws(variables = c("rd"), format = "matrix"))
       d_post <- melt(d_tmp, measure.vars = names(d_tmp))
@@ -712,34 +709,41 @@ sim_ordinal <- function(){
       d_smry_bin[, outcome := "MA rsv+"]
       
       d_smry_rd <- merge(d_smry_ord, d_smry_bin, by = c("outcome"), all.x = T)
-      setcolorder(d_smry_rd, c("outcome", "rd_obs", "rd_mu_ord", "rd_mu_bin"))
+      d_smry_rd[outcome == "MA rsv+", rd_sim := rd_sub[j]]
+      
+      setcolorder(d_smry_rd, c("outcome", "rd_sim", "rd_obs", "rd_mu_ord", "rd_mu_bin"))
       d_smry_rd[, outcome := factor(outcome, levels = cats)]
       d_smry_rd <- d_smry_rd[order(outcome)]
       
+      
       d_tmp <- data.table(f4$draws(variables = c("b"), format = "matrix"))
       d_post <- melt(d_tmp, measure.vars = names(d_tmp))
-      d_smry_ord_b <- d_post[, .(p_mu_bin = mean(value),
+      d_smry_ord_b <- d_post[, .(b_mu_bin = mean(value),
                              q_025 = quantile(value, prob = 0.025),
                              q_975 = quantile(value, prob = 0.975),
                              pr_lt_0 = mean(value < 0))]
+      d_smry_ord_b[, b_sim := round(log(or_new_trt[j]), 5)]
       
             
-      d_tmp <- data.table(f4$draws(variables = c("b"), format = "matrix"))
+      d_tmp <- data.table(f5$draws(variables = c("b"), format = "matrix"))
       d_post <- melt(d_tmp, measure.vars = names(d_tmp))
-      d_smry_bin_b <- d_post[, .(p_mu_bin = mean(value),
+      d_smry_bin_b <- d_post[, .(b_mu_bin = mean(value),
                              q_025 = quantile(value, prob = 0.025),
                              q_975 = quantile(value, prob = 0.975),
                              pr_lt_0 = mean(value < 0))]
       
-      d_smry_ord_b <- rbind(
+      
+      d_smry_b <- rbind(
         cbind(model = "ordinal", d_smry_ord_b),
-        cbind(model = "logistic", d_smry_bin_b)
+        cbind(model = "logistic", d_smry_bin_b),
+        fill = T
       )
+      setcolorder(d_smry_b, c("model", "b_sim"))
       
       list(
         d_smry_p = d_smry_p,
         d_smry_rd = d_smry_rd,
-        d_smry_ord_b = d_smry_ord_b
+        d_smry_b = d_smry_b
       )
       
     }, mc.cores = mc_cores)
@@ -754,29 +758,40 @@ sim_ordinal <- function(){
 l_res_sim <- sim_ordinal()
 
 
+
 ```
 
 
 ```{r}
-#| echo: FALSE
-#| label: fig-pwr_3_rd
-#| fig-cap: 'Power curves characterising power by effect size (risk difference) showing impact when ordinal outcome for the primary outcome.'
-#| fig.height: 4.5
-#| fig.width: 4.5
-#| fig-pos: H
+#| label: ordinal-sim-processing
+#| code-summary: Simulation implementation based on ordinal outcome definition 
+#| code-fold: true
 
-tit <- sprintf("Power curve (N_trt = %.0f, N_ctl = %.0f)", N_trt, N_ctl)
-ggplot(d_fig_1, aes(x = x_rd, y = win_rd)) +
-  geom_smooth(se = F, lwd = 0.3, col = 1, 
-              method = "gam", formula = y ~ s(x, bs = "ps")) +
-  geom_point(data = d_fig_3,
-             aes(x = rd, y = pwr_rd),
-             inherit.aes = F) +
-  scale_y_continuous("Power", breaks = seq(0, 1, by = 0.1)) +
-  scale_x_continuous("Risk difference (p1-p0)", breaks = seq(-0.02, 0.05, by = 0.01)) +
-  theme_minimal() +
-  ggtitle(tit)
+d_smry_p <- rbindlist(lapply(1:length(l_res_sim), function(ii){
+  d_smry_p <- rbindlist(lapply(1:length(l_res_sim[[jj]]), function(jj){
+    l_res_sim[[ii]][[jj]]$d_smry_p  
+  }), idcol = "i_sim")  
+  d_smry_p
+}), idcol = "i_scenario")
+
+d_smry_rd <- rbindlist(lapply(1:length(l_res_sim), function(ii){
+  d_smry_rd <- rbindlist(lapply(1:length(l_res_sim[[jj]]), function(jj){
+    l_res_sim[[ii]][[jj]]$d_smry_rd  
+  }), idcol = "i_sim")  
+  d_smry_rd
+}), idcol = "i_scenario")
+
+d_smry_b <- rbindlist(lapply(1:length(l_res_sim), function(ii){
+  d_smry_b <- rbindlist(lapply(1:length(l_res_sim[[jj]]), function(jj){
+    l_res_sim[[ii]][[jj]]$d_smry_b  
+  }), idcol = "i_sim")  
+  d_smry_b
+}), idcol = "i_scenario")
+
+
+d_smry_b[, .(pwr = mean(pr_lt_0 > 0.975)), keyby = .(i_scenario, model)]
 ```
+
 
 <!-- ::: {#refs} -->
 <!-- ::: -->
