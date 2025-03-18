@@ -429,35 +429,81 @@ ggplot(d_fig_1, aes(x = x_rd, y = win_rd)) +
 
 ### Alternative approaches
 
-
 ```{r}
+#| code-summary: Models for ordinal analysis
 #| echo: false
 #| code-fold: true
 
+m2 <- cmdstanr::cmdstan_model("./stan/ordinal-01.stan")
 m3 <- cmdstanr::cmdstan_model("./stan/ordinal-02.stan")
+m4 <- cmdstanr::cmdstan_model("./stan/logistic.stan")
 ```
+
+```{r}
+#| label: ordinal-setup
+#| code-summary: Setup constants for ordinal outcome variable 
+#| code-fold: true
+
+
+# Define categories and probabilities under standard treatment
+cats <- c(
+  "death", #  - all cause
+  "icu", #  - all cause
+  "hosp rsv+",  
+  "MA rsv+",  
+  "MA rsv-", 
+  "MA rti", 
+  "No MA")
+
+p_soc <- c(0.01, 0.01, 0.03, 0.05, 0.05, 0.55, 0.3) 
+names(p_soc) <- cats
+stopifnot(sum(p_soc) == 1)
+p_soc
+
+
+compute_probs <- function(p_soc, or_new_trt){
+  cum_p_soc <- cumsum(p_soc)
+  # Logit transformation of cumulative probabilities for standard treatment
+  lo_cum_probs_soc <- qlogis(cum_p_soc[-length(cum_p_soc)])
+  # Adjust logit cumulative probabilities for new treatment
+  lo_cum_p_new <- lo_cum_probs_soc + log(or_new_trt)
+  cum_p_new <- plogis(lo_cum_p_new)
+  cum_p_new <- c(cum_p_new, 1)  # Ensure last category is 1
+  p_new <- diff(c(0, cum_p_new))  # Convert
+  m <- rbind(p_new, p_soc)  
+  colnames(m) <- cats
+  m
+}
+
+compute_probs(p_soc, or_new_trt = 0.7)
+
+```
+
+
+If a set of applicable outcomes could be ranked, then an ordinal outcome might lead to power gains.
+
+Under a cross-sectional perspective, a units' worst state over the 360 days since birth is taken as the observation for that outcome, which is effectively just providing some finer granularity to what was previously an indicator variable. 
+The approach might evaluate treatment effects directly or use the model to estimate probabilities of being at various states. 
+Clearly, we are making additional assumptions here, but we are also leveraging additional information without having to rely on historic data.
 
 ```{r}
 #| label: ordinal-data
 #| code-summary: Data generation for ordinal outcome definition 
 #| code-fold: true
 
-# Define categories and probabilities under standard treatment
-cats <- c(
-  "death - all cause", 
-  "hosp - rti rsv confirmed", 
-  "hosp - all cause rti", 
-  "MA - rti rsv confirmed", 
-  "MA - all cause rti", 
-  "No MA - for all cause rti")
 
 # only supports a single historic control for the moment because that
 # is all we have.
 get_ordinal_data <- function(
     N = 3000, 
     or_new_trt = 0.7,
-    # death, hosp rsv, hosp rti, ma rsv, ma rti, no ma for rti
-    p_soc = c(0.02, 0.03, 0.03, 0.05, 0.6, 0.27) 
+    # death, 
+    # hosp rti rsv+, 
+    # hosp rti, 
+    # ma rti rsv+, 
+    # ma rti, 
+    # no ma for rti  
+    p_soc = c(0.01, 0.01, 0.03, 0.05, 0.05, 0.55, 0.3) 
     ){
   
   cum_p_soc <- cumsum(p_soc)  
@@ -490,6 +536,27 @@ get_ordinal_data <- function(
 # d_smry
 ```
 
+Comparison of binary vs ordinal perspective on single data set.
+
+```{r}
+d_trial <- get_ordinal_data(N = 3000, 0.7)
+d_trial[outcome == "MA rsv+", y_bin := 1]
+d_trial[outcome != "MA rsv+", y_bin := 0]
+d_trial[trt == "SoC", x := 0]
+d_trial[trt == "New", x := 1]
+
+h1 <- glm(y_bin ~ x, data = d_trial, family = "binomial")
+
+d_trial[, outcome := factor(outcome, levels = cats)]
+h2 <- MASS::polr(outcome ~ x, data = d_trial, Hess = TRUE)
+
+# trt arm
+marginaleffects::predictions(h1, newdata = data.table(x = 0:1), type = "response")
+# compare results to those for MA rsv+ below
+marginaleffects::predictions(h2, newdata = data.table(x = 0:1), type = "probs")
+```
+
+
 ```{r}
 #| label: ordinal-sim-1
 #| code-summary: Simulation implementation based on ordinal outcome definition 
@@ -512,7 +579,9 @@ risk_diff_on_po_opt <- function(or_new_trt, rd_target){
 
 # Compute the ORs that are consistent with risk differences that we 
 # have looked at previously.
-or_new_trt <- numeric(length(p_1_sub))
+p_1_sub <- c(0.0250, 0.0375, 0.0425, 0.0500, 0.0625)
+p_1_sub - p_0
+or_new_trt <- length(p_1_sub)
 for(i in seq_along(p_1_sub)){
   
   or_new_trt[i] <- optimize(
@@ -522,74 +591,192 @@ for(i in seq_along(p_1_sub)){
   
 }
 
-# sanity check
-# cum_p_soc <- cumsum(p_soc)  
-# # Logit transformation of cumulative probabilities for standard treatment
-# lo_cum_probs_soc <- qlogis(cum_p_soc[-length(cum_p_soc)])
-# # Adjust logit cumulative probabilities for new treatment
-# lo_cum_p_new <- lo_cum_probs_soc + log(or_new_trt[5])
-# cum_p_new <- plogis(lo_cum_p_new)
-# cum_p_new <- c(cum_p_new, 1)  # Ensure last category is 1
-# p_new <- diff(c(0, cum_p_new))  # Convert 
-# rbind(p_new, p_soc)
-# round(p_new[4] -  p_soc[4], 4)
-# p_1_sub - p_0
-
-
 sim_ordinal <- function(){
   
-  # to store results
-  d_res <- data.table(
-    rd = rd_sub, 
-    pwr_rd = NA_real_
-  )
   
-  j <- 1
+  l_res <- list()
+  
+  i <- j <- 3
   for(j in seq_along(or_new_trt)){
     
-    res <- mclapply(1:n_sim, function(i){
+    l_res[[j]] <- mclapply(1:n_sim, function(i){
       
       d_trial <- get_ordinal_data(N = 3000, or_new_trt[j])
-      # counts by groups
-      d_trial_agg <- d_trial[, .N, keyby = .(trt, outcome)]
-
+      d_trial[trt == "New", x := 1]
+      d_trial[trt == "SoC", x := 0]
+      d_trial <- d_trial[order(x)]
+      # dcast(d_trial[, .N, keyby = .(trt, outcome)], outcome ~ trt, value.var = "N")
+      
+      d_trial_grp <- d_trial[, .N, keyby = .(trt, x, outcome)]
+      d_trial_grp[, p_obs := N / (nrow(d_trial)/2)]
+      d_trial_grp <- d_trial_grp[order(x)]
+      
+      d_trial_bin <- copy(d_trial_grp)
+      d_trial_bin[outcome == "MA rsv+", evt := 1]
+      d_trial_bin[outcome != "MA rsv+", evt := 0]
+      d_trial_bin <- d_trial_bin[, .(N = sum(N)), keyby = .(trt, evt)]
+      d_trial_bin <- dcast(d_trial_bin, trt ~ evt, value.var = "N")
+      setnames(d_trial_bin, "0", "failure")
+      setnames(d_trial_bin, "1", "success")
+      d_trial_bin[, n := failure + success]
+      d_trial_bin[trt == "New", x := 1]
+      d_trial_bin[trt == "SoC", x := 0]
+      d_trial_bin <- d_trial_bin[order(x)]
+      d_trial_bin[, p_obs := success/n]
+      
+      # ld <- list(
+      #   N = nrow(d_trial),
+      #   K = length(cats),
+      #   P = 1,
+      #   y = as.integer(d_trial$outcome),
+      #   X = as.matrix(d_trial$x, ncol = 1, drop = F )
+      # )
+      # 
+      # f3 <- m2$sample(
+      #   ld, iter_warmup = 1000, iter_sampling = 2000,
+      #   parallel_chains = 1, chains = 1, refresh = 0, show_exceptions = F,
+      #   max_treedepth = 10, adapt_delta = 0.99)
+      
       ld <- list(
-        N = nrow(d_trial_agg),
+        N = nrow(d_trial_grp),
         K = length(cats),
         P = 1,
-        y = as.integer(d_trial_agg$outcome),
-        X = as.matrix(as.numeric(d_trial_agg$trt == "New"), ncol = 1, drop = F ),
-        wgt = d_trial_agg$N
+        y = as.integer(d_trial_grp$outcome),
+        X = as.matrix(d_trial_grp$x, ncol = 1, drop = F ),
+        wgt = d_trial_grp$N,
+        pri_b_s = 3, pri_cuts_s = 3
       )
       
-      f3 <- m3$sample(
+      f4 <- m3$sample(
         ld, iter_warmup = 1000, iter_sampling = 2000,
         parallel_chains = 1, chains = 1, refresh = 0, show_exceptions = F,
         max_treedepth = 10, adapt_delta = 0.99)
-
-
-      d_tmp <- data.table(f3$summary(
-        variables = c("rd"),
-        prob_dec = ~ mean(. < 0)))
       
-      win_rd <- d_tmp[variable == "rd", prob_dec > 0.975]
-
-      c(win_rd = win_rd)
+      
+      ld <- list(
+        N = nrow(d_trial_bin),
+        y = d_trial_bin$success, n = d_trial_bin$n,
+        X = as.matrix(d_trial_bin$x, ncol = 1, drop = F )
+      )
+      
+      f5 <- m4$sample(
+        ld, iter_warmup = 1000, iter_sampling = 2000,
+        parallel_chains = 1, chains = 1, refresh = 0, show_exceptions = T,
+        max_treedepth = 10, adapt_delta = 0.99)
+      
+      # extract cuts and check.
+      
+      d_tmp <- data.table(f4$draws(variables = c("p0", "p1"), format = "matrix"))
+      d_post <- melt(d_tmp, measure.vars = names(d_tmp))
+      d_post[, ix := gsub("p.\\[", "", variable, fixed = F)]
+      d_post[, ix := as.numeric(gsub("\\]", "", ix, fixed = F))]
+      d_post[variable %like% "p0", trt := "SoC"]
+      d_post[variable %like% "p1", trt := "New"]
+      d_smry_ord <- d_post[, .(p_mu_ord = mean(value)), keyby = .(trt, ix)]
+      d_smry_ord[, outcome := cats[length(cats) + 1 -ix]]
+      d_smry_ord[, ix := NULL]
+      d_smry_ord <- merge(d_smry_ord, d_trial_grp, by = c("trt", "outcome"), all = T)
+      
+      d_tmp <- data.table(f5$draws(variables = c("p0", "p1"), format = "matrix"))
+      d_post <- melt(d_tmp, measure.vars = names(d_tmp))
+      d_post[variable %like% "p0", trt := "SoC"]
+      d_post[variable %like% "p1", trt := "New"]
+      d_smry_bin <- d_post[, .(p_mu_bin = mean(value)), keyby = .(trt)]
+      d_smry_bin[, outcome := "MA rsv+"]
+      
+      d_smry_p <- merge(d_smry_ord, d_smry_bin, by = c("trt", "outcome"), all.x = T)
+      setcolorder(d_smry_p, c("trt", "x", "outcome", "N", "p_obs", "p_mu_ord", "p_mu_bin"))
+      
+      d_smry_p[, outcome := factor(outcome, levels = cats)]
+      d_smry_p <- d_smry_p[order(outcome, x)]
+      d_smry_p
+      
+      d_tmp <- data.table(f4$draws(variables = c("rd"), format = "matrix"))
+      d_post <- melt(d_tmp, measure.vars = names(d_tmp))
+      d_post[, ix := gsub("rd\\[", "", variable, fixed = F)]
+      d_post[, ix := as.numeric(gsub("\\]", "", ix, fixed = F))]
+      d_smry_ord <- d_post[, .(
+        rd_mu_ord = mean(value),
+        pr_lt_0 = mean(value < 0)
+        ), keyby = .(ix)]
+      d_smry_ord[, outcome := cats[length(cats) + 1 -ix]]
+      d_smry_ord[, ix := NULL]
+      d_smry_ord <- merge(
+        d_smry_ord, 
+        dcast(d_trial_grp, outcome ~ trt, value.var = "p_obs")[, .(outcome, rd_obs = New - SoC)], 
+        by = c("outcome"), all = T)
+      
+      d_tmp <- data.table(f5$draws(variables = c("rd"), format = "matrix"))
+      d_post <- melt(d_tmp, measure.vars = names(d_tmp))
+      d_smry_bin <- d_post[, .(rd_mu_bin = mean(value))]
+      d_smry_bin[, outcome := "MA rsv+"]
+      
+      d_smry_rd <- merge(d_smry_ord, d_smry_bin, by = c("outcome"), all.x = T)
+      setcolorder(d_smry_rd, c("outcome", "rd_obs", "rd_mu_ord", "rd_mu_bin"))
+      d_smry_rd[, outcome := factor(outcome, levels = cats)]
+      d_smry_rd <- d_smry_rd[order(outcome)]
+      
+      d_tmp <- data.table(f4$draws(variables = c("b"), format = "matrix"))
+      d_post <- melt(d_tmp, measure.vars = names(d_tmp))
+      d_smry_ord_b <- d_post[, .(p_mu_bin = mean(value),
+                             q_025 = quantile(value, prob = 0.025),
+                             q_975 = quantile(value, prob = 0.975),
+                             pr_lt_0 = mean(value < 0))]
+      
+            
+      d_tmp <- data.table(f4$draws(variables = c("b"), format = "matrix"))
+      d_post <- melt(d_tmp, measure.vars = names(d_tmp))
+      d_smry_bin_b <- d_post[, .(p_mu_bin = mean(value),
+                             q_025 = quantile(value, prob = 0.025),
+                             q_975 = quantile(value, prob = 0.975),
+                             pr_lt_0 = mean(value < 0))]
+      
+      d_smry_ord_b <- rbind(
+        cbind(model = "ordinal", d_smry_ord_b),
+        cbind(model = "logistic", d_smry_bin_b)
+      )
+      
+      list(
+        d_smry_p = d_smry_p,
+        d_smry_rd = d_smry_rd,
+        d_smry_ord_b = d_smry_ord_b
+      )
       
     }, mc.cores = mc_cores)
     
-    pwr <- colMeans(data.table(do.call(rbind, res)))
-    d_res[j, pwr_rd := pwr[1]]
-    
   }
-  d_res
+  
+  l_res
 }
+
+
+
+l_res_sim <- sim_ordinal()
 
 
 ```
 
 
+```{r}
+#| echo: FALSE
+#| label: fig-pwr_3_rd
+#| fig-cap: 'Power curves characterising power by effect size (risk difference) showing impact when ordinal outcome for the primary outcome.'
+#| fig.height: 4.5
+#| fig.width: 4.5
+#| fig-pos: H
 
+tit <- sprintf("Power curve (N_trt = %.0f, N_ctl = %.0f)", N_trt, N_ctl)
+ggplot(d_fig_1, aes(x = x_rd, y = win_rd)) +
+  geom_smooth(se = F, lwd = 0.3, col = 1, 
+              method = "gam", formula = y ~ s(x, bs = "ps")) +
+  geom_point(data = d_fig_3,
+             aes(x = rd, y = pwr_rd),
+             inherit.aes = F) +
+  scale_y_continuous("Power", breaks = seq(0, 1, by = 0.1)) +
+  scale_x_continuous("Risk difference (p1-p0)", breaks = seq(-0.02, 0.05, by = 0.01)) +
+  theme_minimal() +
+  ggtitle(tit)
+```
 
 <!-- ::: {#refs} -->
 <!-- ::: -->
