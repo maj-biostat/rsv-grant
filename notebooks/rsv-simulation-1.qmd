@@ -17,15 +17,17 @@ suppressWarnings(suppressPackageStartupMessages(library(cmdstanr)))
 library(data.table)
 library(ggplot2)
 library(parallel)
+library(mcprogress)
 
 set.seed(92818785)
 # Simulation controls
 n_sim <- 10000
 
 # Assume somewhat higher risk on the RSVpreF arm than observed in the MATISSE study
-p_0 <- 0.05
+# given that the study was run during covid
+p_0 <- 0.1
 
-p_1 <- p_0 + seq(-0.025, 0.025, len = n_sim)
+p_1 <- p_0 + seq(-0.03, 0.03, len = n_sim)
 
 # Effects based on risk difference and/or VE
 rd <- p_1 - p_0
@@ -35,20 +37,28 @@ ve <- 1-(p_1/p_0)
 N_per_arm <- 1500
 
 mc_cores <- 60
+
+m1 <- cmdstanr::cmdstan_model("../stan/historic-control-1.stan")
+m2 <- cmdstanr::cmdstan_model("../stan/ordinal-01.stan")
+m3 <- cmdstanr::cmdstan_model("../stan/ordinal-02.stan")
+m4 <- cmdstanr::cmdstan_model("../stan/logistic.stan")
 ```
 
 ## Background
 
 ### Aim
 
-We 
-
+We want to compare effectiveness of IG vs RSVpreF for protection against RSV in the first 360 days of life.
 
 ### Interventions
 
++ IG - monoclonal antibody given to infant at birth
++ RSVpreF - maternal vaccine given after 32 weeks gestation
 
 ### Randomisation
 
+Balanced 1:1 randomisation. 
+Variations might be warranted under the use of historical controls.
 
 ### Primary outcome
 
@@ -63,11 +73,15 @@ Options:
 
 + ordinal variable indicating health state at each follow up:
 
-  + death
-  + medical attendance for respiratory tract infection
-  + medical attendance for respiratory tract infection + RSV positive test
-  + hospitalised for respiratory tract infection + RSV positive test
-  + hospitalised for severe respiratory tract infection + RSV positive test
+  + no rsv - no occurrence of positive rsv result (irrespective of medical attendance status)
+  + ma - medical attendance for rti with positive rsv
+  + hosp - hospitalisation for rti with positive rsv
+  + icu - icu for rti with positive rsv
+  + death - all cause mortality
+  
+The ordinal perspective is considered as a method to improve efficiency.
+The categories aim to represent a exhaustive and mutually exclusive ranked set.
+An additional category for positive rsv but no medical attendance might be added for completeness.
 
 ### Estimand
 
@@ -84,6 +98,8 @@ For the medically attended lower RTI with RSV positive test (RSV-MA-LRTI, see Ta
 
 No day 360 data available for immunoprophylaxis (nirsevimab).
 
+During the COVID-19 pandemic rsv rates were lower than typical and so a baseline risk of 10% is used here.
+
 ### Constraints
 
 Sample size up to approximately 3000 dyads.
@@ -94,9 +110,12 @@ A high-level description of the analysis options include:
 
 + Conjugate beta binomial analysis comparing the number of binary events by arm at a cross sectional timepoint (e.g. 360 days)
 + Leverage historical controls via partial pooling
-+ Logistic regression comparing the number of binary events by arm adjusting for prognostic covariates
-+ Longitudinal analysis 
++ Ordinal analysis - proportional odds
 
+Other alternatives might include longitudinal analyses on ordinal health states at key follow up times.
+Sequential study might enable early stopping.
+
+Here we consider a single analysis at the maximum follow up.
 
 ## Operating characteristics
 
@@ -109,7 +128,7 @@ Analysis based on conjugate beta binomial model.
 Consider two possible trial conclusion criteria, tailored dependening on what is more relevant.
 These are arbitrary and applied indepdently, just to motivate discussion.
 
-1. Conclude that IG is more effective if there is a 97.5% (or higher) probability that it reduces the risk of MA-RTI relative to the RSVpreF arm. That is, $Pr(p_1 < p_0) > 0.975 \implies \text{trial success}$. The control arm (RSVpreF) is assumed to have an event risk of $p_0 = 0.05$ and the IG group event risk $p_1 \in \{x : 0.025 \le x \le 0.075\}$ where values lower than $p_0$ imply benefit associated with IG relative to RSVpreF.
+1. Conclude that IG is more effective if there is a 97.5% (or higher) probability that it reduces the risk of MA-RTI relative to the RSVpreF arm. That is, $Pr(p_1 < p_0) > 0.975 \implies \text{trial success}$. The control arm (RSVpreF) is assumed to have an event risk of $p_0 = 0.1$ and the IG group event risk $p_1 \in \{x : 0.025 \le x \le 0.075\}$ where values lower than $p_0$ imply benefit associated with IG relative to RSVpreF.
 2. Conclude that IG is more effective if there is a 90% (or higher) probability that the VE, defined as 1 - RR, is above 20%. That is, $Pr(1 - (p_1 / p_0) > 0.2) > 0.9 \implies \text{trial success}$. VE is computed from the same values nominated as above. When evaluating two active vaccines, it is possible for VE to be less than zero, e.g. when the interventional arm increases risk, $p_1 > p_0$. This approach is simply stating that there needs to be some minimal non-zero effect present, but does not require such a stringent decision criteria.
 
 The power curve is based on interpolating the results from `r n_sim` simulated trials.
@@ -150,7 +169,7 @@ integrand_2 <- function(
   })
 }
 
-res <- mclapply(1:n_sim, function(i){
+res <- pmclapply(1:n_sim, function(i){
   
   # i = sample(1:n_sim, 1)
   # Evaluate whether risk of event is lower on IG arm
@@ -197,7 +216,7 @@ d_fig_1 <- data.table(
 
 ```{r}
 #| echo: FALSE
-#| label: fig-pwr_1_rd
+#| label: fig-pwr_1-rd
 #| fig-cap: 'Power curves characterising power by effect size (risk difference) at a sample size of 1500 per arm in two group study with binary outcome'
 #| fig.height: 4.5
 #| fig.width: 4.5
@@ -207,15 +226,15 @@ d_fig_1 <- data.table(
 ggplot(d_fig_1, aes(x = x_rd, y = win_rd)) +
   geom_smooth(se = F, lwd = 0.3, col = 1, 
               method = "gam", formula = y ~ s(x, bs = "ps")) +
-  scale_y_continuous("Power", breaks = seq(0, 1, by = 0.1)) +
-  scale_x_continuous("Risk difference (p1-p0)", breaks = seq(-0.02, 0.05, by = 0.01)) +
+  scale_y_continuous("Power", limits = c(0, 1), breaks = seq(0, 1, by = 0.1)) +
+  scale_x_continuous("Risk difference (p1-p0)", breaks = seq(-0.03, 0.03, by = 0.01)) +
   theme_minimal()
 ```
 
 
 ```{r}
 #| echo: FALSE
-#| label: fig-pwr_1_ve
+#| label: fig-pwr_1-ve
 #| fig-cap: 'Power curves characterising power by effect size (vaccine effectiveness) at a sample size of 1500 per arm in two group study with binary outcome'
 #| fig.height: 4.5
 #| fig.width: 4.5
@@ -225,7 +244,7 @@ ggplot(d_fig_1, aes(x = x_rd, y = win_rd)) +
 ggplot(d_fig_1, aes(x = x_ve, y = win_ve)) +
   geom_smooth(se = F, lwd = 0.3, col = 1, 
               method = "gam", formula = y ~ s(x, bs = "ps")) +
-  scale_y_continuous("Power", breaks = seq(0, 1, by = 0.1)) +
+  scale_y_continuous("Power", limits = c(0, 1), breaks = seq(0, 1, by = 0.1)) +
   scale_x_continuous("Vaccine effectiveness (1 - RR)", breaks = seq(-1, 0.4, by = 0.2)) +
   theme_minimal()
 ```
@@ -235,19 +254,13 @@ ggplot(d_fig_1, aes(x = x_ve, y = win_ve)) +
 ### Historic controls
 
 
-```{r}
-#| echo: false
-#| code-fold: true
-
-m1 <- cmdstanr::cmdstan_model("../stan/historic-control-1.stan")
-```
 
 ```{r}
 #| label: setup2
 #| code-summary: Configuring inputs for simulation
 #| code-fold: true
     
-n_sim <- 2500
+n_sim <- 200
 
 # Only look at subset of original p_1
 p_1_sub <- quantile(p_1, probs = c(0, 0.25, 0.5, 0.75, 1))
@@ -283,7 +296,6 @@ $$
 \begin{aligned}
 Y_0 &\sim \text{Bin}(n_0, p_0) \quad \text{Current control arm RSVpreF} \\
 Y_1 &\sim \text{Bin}(n_1, p_1) \quad \text{Current treatment arm IG} \\
-
 Y_h &\sim \text{Bin}(n_h, p_h) \quad \text{Historic data for RSVpreF from trial } h \\
 \text{logit}(p_0), \text{logit}(p_h) &\sim \text{N}(\mu, \tau) \quad \text{Common distribution for controls}\\
 \mu &\sim \text{Normal}(\text{logit}(0.05), 0.25) \\
@@ -292,10 +304,12 @@ p_1 &\sim \text{Beta}(0.5, 9.5)
 \end{aligned}
 $$
 
-meaning $\mu$ and $\tau$ represent the between study mean and SD. 
-When $\tau$ is small, all the logits are similar, so it is appropriate to leverage historic information.
+$\mu$ and $\tau$ represent the between study mean and SD. 
+When $\tau$ is small, all the logits are similar, motivating greater use of the historic information.
 When $\tau$ is large, we have observed high variability in the control rate and thus we do not want to incorporate much of the earlier data.
-Quantities such as risk difference and VE are then derived as functions of the above.
+Thus leverage on the historic information enters through the degree of shrinkage rather than directly through the likelihood.
+
+Quantities such as risk difference and VE are then derived as functions of the above parameters.
 
 With only a single trial, we have negligible data to inform the distribution of results on RSVpreF at 360 days.
 Therefore, the results are highly dependent on whether the current trial aligns with the historic trial along with the assumptions we make about the trial to trial variability of risk on the RSVpreF arm.
@@ -305,33 +319,68 @@ If the historic data for the RSVpreF arm is associated with a lower risk, then t
 In the former case, power will usually be impeded, in the latter case, power will usually increase.
 
 For example, think about a specific case where we look at the risk difference.
-Assume that the true $p_0 = 0.05$ but the historic control says $p_h = 0.02$. 
-At the same time assume that $p_1 = 0.03$.
-With no pooling $rd = p_1 - p_0 = 0.03 - 0.05 = -0.02$ but when we partially pool the control arm, we will end up with something more like $rd = p_1 - p_0 = 0.03 - 0.04 = -0.01$ because the $p_0$ arm has been pulled towards $p_h = 0.02$.
+Assume that the true $p_0 = 0.1$ but the historic control says $p_h = 0.06$. 
+At the same time assume that $p_1 = 0.08$.
+With no pooling $rd = p_1 - p_0 = 0.08 - 0.1 = -0.02$ but when we partially pool the control arm, we will end up with something more like $rd = p_1 - p_0 = 0.09 - 0.08 = -0.01$ because the $p_0$ arm has been pulled towards $p_h = 0.06$.
 Demonstration below (simulated trials `r n_sim` for scenarios with $p_0$ set as before and $p_1$ set to `r paste0(p_1_sub, collapse = ", ")`.
 An informative prior was put on the risk under IG that aligns with a belief that there is a 95% chance that the risk of the outcome is lower than 20%.
 
 ```{r}
 #| label: historic-ctl-sim-1
-#| code-summary: Simulation implementation based on single historic control 
+#| code-summary: Simulation implementation using historic control 
 #| code-fold: true
+
+
+get_default_sim_hist_rtn <- function(){
+  
+  d_smry_rd  <- data.table(
+    rd_mu = NA_real_, pr_lt_0 = NA_real_, rd_sim = NA_real_
+  )
+  d_smry_ve  <- data.table(
+    ve_mu = NA_real_, pr_gt_20 = NA_real_, ve_sim = NA_real_
+  )
+  
+  return(
+    
+    list(
+      d_smry_rd = d_smry_rd,
+      d_smry_ve = d_smry_ve
+    )
+    
+  )
+  
+}
 
 # only supports a single historic control for the moment because that
 # is all we have.
-sim_historic_control <- function(yh = 92, nh = 3495){
+N_ctl = 1500
+N_trt = 1500
+p_0 = 0.1
+p_1 = c(0.075, 0.0875, 0.1, 0.1125, 0.125)
+yh = 92
+nh = 3495
+# n_sim = 10
+
+sim_historic_control <- function(
+    N_ctl = 1500, 
+    N_trt = 1500,
+    p_0 = 0.1,
+    p_1 = c(0.075, 0.0875, 0.1, 0.1125, 0.125),
+    yh = 92, 
+    nh = 3495,
+    n_sim = 200
+    ){
   
-  # to store results
-  d_res <- data.table(
-    rd = rd_sub, ve = ve_sub,
-    pwr_rd = NA_real_, pwr_ve = NA_real_
-  )
   
-  for(j in seq_along(p_1_sub)){
+  l_res <- list()
+  
+  j <- 3; i = 3
+  for(j in seq_along(p_1)){
     
     y_0 <- rbinom(n_sim, N_ctl, p_0)
-    y_1 <- rbinom(n_sim, N_trt, p_1_sub[j])
+    y_1 <- rbinom(n_sim, N_trt, p_1[j])
     
-    res <- mclapply(1:n_sim, function(i){
+    l_res[[j]] <- pmclapply(1:n_sim, function(i){
       
       ld <- list(
         n0 = N_ctl, y0 = y_0[i], 
@@ -352,72 +401,185 @@ sim_historic_control <- function(yh = 92, nh = 3495){
         # that 32%
         pri_pt = c(alpha(mu, nu), beta(mu, nu))
       )
+      
+      l_ret <- tryCatch({
+        
+        outname <- paste0(
+          format(Sys.time(), format = "%Y%m%d%H%M%S"),
+          "-historic-control-1-", j, "-", i)
+        f1 <- m1$sample(
+          ld, iter_warmup = 1000, iter_sampling = 2000,
+          parallel_chains = 1, chains = 1, refresh = 0, show_exceptions = T,
+          max_treedepth = 10, adapt_delta = 0.99,
+          output_dir = "/home/mark/Documents/rsv-grant/tmp",
+          output_basename = outname)
+        
+        if(is.null(f1) ){ 
+          
+          if(is.null(f1)){
+            message_parallel("Scenario ", j, " trial ", i, " model issue, f1 is null")  
+          }
+          
+          return(get_default_sim_hist_rtn())
+          
+        }
+        
+        # Risk difference 
+        d_tmp <- data.table(f1$draws(variables = c("rd"), format = "matrix"))
+        d_post <- melt(d_tmp, measure.vars = names(d_tmp))
+        d_smry_rd <- d_post[, .(rd_mu = mean(value),
+                                pr_lt_0 = mean(value < 0)
+                                )]
+        d_smry_rd[, rd_sim := p_1[j] - p_0]
+        
+        d_tmp <- data.table(f1$draws(variables = c("ve"), format = "matrix"))
+        d_post <- melt(d_tmp, measure.vars = names(d_tmp))
+        d_smry_ve <- d_post[, .(ve_mu = mean(value),
+                                pr_gt_20 = mean(value > 0.2)
+                                )]
+        d_smry_ve[, ve_sim := (1 - (p_1[j]/p_0))]
+        
+        list(
+          d_smry_rd = d_smry_rd,
+          d_smry_ve = d_smry_ve
+        )
+        
+        
+      }, warning = function(war) {
+        
+        message_parallel("Scenario ", j, " trial ", i, " warn ", war)  
+        return(get_default_sim_hist_rtn())
+        
+      }, error = function(err) {
+        
+        message_parallel("Scenario ", j, " trial ", i, " err ", err)
+        return(get_default_sim_hist_rtn())
+        
+      }, finally = {
+        # noop
+      } )
     
-      f1 <- m1$sample(
-        ld, iter_warmup = 1000, iter_sampling = 2000,
-        parallel_chains = 1, chains = 1, refresh = 0, show_exceptions = T,
-        max_treedepth = 10, adapt_delta = 0.99)
       
-      # snk <- capture.output(
-      #   f1 <- m1$pathfinder(ld, num_paths=20, single_path_draws=200,
-      #                       history_size=50, max_lbfgs_iters=100,
-      #                       refresh = 0, draws = 2000)
-      #   )
-    
-      d_tmp <- data.table(f1$summary(
-        variables = c("rd"),
-        prob_dec = ~ mean(. < 0)))
       
-      win_rd <- d_tmp[variable == "rd", prob_dec > 0.975]
-      
-      d_tmp <- data.table(f1$summary(
-        variables = c("ve"),
-        prob_dec = ~ mean(. > 0.2)))
-      
-      win_ve <- d_tmp[variable == "ve", prob_dec > 0.9]
-      
-      c(win_rd = win_rd, win_ve = win_ve)
-      
-    }, mc.cores = mc_cores)
-    
-    pwr <- colMeans(data.table(do.call(rbind, res)))
-    d_res[j, pwr_rd := pwr[1]]
-    d_res[j, pwr_ve := pwr[2]]
+    }, mc.cores = mc_cores, title = paste0("Historic control, p_1 ", p_1[j]))
     
   }
-  d_res
+  l_res
 }
 
 
-d_fig_2a <- copy(sim_historic_control())
-d_fig_2b <- copy(sim_historic_control(yh = 175, nh = 3495))
+
+
+```
+
+```{r}
+#| label: sim-historic-processing
+#| code-summary: Results processing
+#| code-fold: true
+
+
+combine_sim_hist_data <- function(
+    l_res_sim
+){
+  
+  d_smry_rd <- rbindlist(lapply(1:length(l_res_sim), function(ii) {
+    d_smry_rd <- rbindlist(lapply(1:length(l_res_sim[[ii]]), function(jj) {
+      # message("Scenario ", ii, " trial ", jj)
+      l_res_sim[[ii]][[jj]]$d_smry_rd
+    }), idcol = "i_sim")
+    d_smry_rd
+  }), idcol = "i_scenario")
+  
+  d_smry_ve <- rbindlist(lapply(1:length(l_res_sim), function(ii) {
+    d_smry_ve <- rbindlist(lapply(1:length(l_res_sim[[ii]]), function(jj) {
+      l_res_sim[[ii]][[jj]]$d_smry_ve
+    }), idcol = "i_sim")
+    d_smry_ve
+  }), idcol = "i_scenario")
+  
+  return(
+    list(
+      d_smry_rd = d_smry_rd,
+      d_smry_ve = d_smry_ve
+      
+    )
+  )
+  
+}
+
+
+
+
+
+```
+
+```{r}
+#| label: historic-sim-1
+#| code-summary: Run historic control simulation at N = 3000 total sample size 
+#| code-fold: true
+
+N_ctl <- N_trt <- 1500 
+  
+l_res_sim_1 <- sim_historic_control(
+    N_ctl = N_ctl, 
+    N_trt = N_trt,
+    p_0 = 0.1,
+    p_1 = c(0.075, 0.0875, 0.1, 0.1125, 0.125),
+    yh = 92, 
+    nh = 3495,
+    n_sim = 5000
+)
+
+
+
+l_res_sim_2 <- sim_historic_control(
+    N_ctl = N_ctl, 
+    N_trt = N_trt,
+    p_0 = 0.1,
+    p_1 = c(0.075, 0.0875, 0.1, 0.1125, 0.125),
+    yh = 350, 
+    nh = 3495,
+    n_sim = 5000
+)
+```
+
+```{r}
+#| echo: FALSE
+#| label: fig-pwr_2-rd
+#| fig-cap: 'Power curves by effect size (risk difference) showing impact when historic control is lower and when the historic control is aligned with the present data.'
+#| fig.height: 4.5
+#| fig.width: 4.5
+#| fig-pos: H
+
+l_res_comb_1 <- combine_sim_hist_data(l_res_sim_1)
+l_res_comb_2 <- combine_sim_hist_data(l_res_sim_2)
+
+if(any(is.na(l_res_comb_1$d_smry_rd$rd_mu))){
+  d_tmp <- l_res_comb_1$d_smry_rd[is.na(rd_mu)]  
+  message("Of the ", length(l_res_sim_1[[1]]), ", ", nrow(d_tmp), 
+          " had NA values for the posterior summary. These results will be removed.")
+  
+}
+
+d_fig_2a <- l_res_comb_1$d_smry_rd[!is.na(rd_mu), .(pwr = mean(pr_lt_0 > 0.975)), 
+                                 keyby = .(i_scenario, rd_sim)]
+d_fig_2b <- l_res_comb_2$d_smry_rd[!is.na(rd_mu), .(pwr = mean(pr_lt_0 > 0.975)), 
+                                 keyby = .(i_scenario, rd_sim)]
 
 d_fig_2 <- rbind(
   cbind(data.table(p_h = sprintf("%.1f%%", 100*92/3495)), d_fig_2a),
   cbind(data.table(p_h = sprintf("%.1f%%", 100*175/3495)), d_fig_2b)
 )
 
-```
-
-
-
-```{r}
-#| echo: FALSE
-#| label: fig-pwr_2_rd
-#| fig-cap: 'Power curves characterising power by effect size (risk difference) showing impact when historic control is lower and when the historic control is aligned with the present data.'
-#| fig.height: 4.5
-#| fig.width: 4.5
-#| fig-pos: H
-
 tit <- sprintf("Power curve (N_trt = %.0f, N_ctl = %.0f)", N_trt, N_ctl)
 ggplot(d_fig_1, aes(x = x_rd, y = win_rd)) +
   geom_smooth(se = F, lwd = 0.3, col = 1, 
               method = "gam", formula = y ~ s(x, bs = "ps")) +
   geom_point(data = d_fig_2,
-             aes(x = rd, y = pwr_rd, col = p_h),
+             aes(x = rd_sim, y = pwr, col = p_h),
              inherit.aes = F) +
-  scale_y_continuous("Power", breaks = seq(0, 1, by = 0.1)) +
-  scale_x_continuous("Risk difference (p1-p0)", breaks = seq(-0.02, 0.05, by = 0.01)) +
+  scale_y_continuous("Power", limits = c(0, 1), breaks = seq(0, 1, by = 0.1)) +
+  scale_x_continuous("Risk difference (p1-p0)", breaks = seq(-0.03, 0.03, by = 0.01)) +
   scale_color_discrete("Risk in historic study for RSVpreF") +
   theme_minimal() +
   theme(legend.position = "bottom") +
@@ -429,15 +591,9 @@ ggplot(d_fig_1, aes(x = x_rd, y = win_rd)) +
 
 ### Alternative approaches
 
-```{r}
-#| code-summary: Models for ordinal analysis
-#| echo: false
-#| code-fold: true
-
-m2 <- cmdstanr::cmdstan_model("./stan/ordinal-01.stan")
-m3 <- cmdstanr::cmdstan_model("./stan/ordinal-02.stan")
-m4 <- cmdstanr::cmdstan_model("./stan/logistic.stan")
-```
+If a set of applicable outcomes could be ranked, then an ordinal outcome might lead to some efficiency and power gains.
+For the sake of the simulation, the following categories and distribution are assumed.
+These are based on a scenario when the treatment effect is an odds ratio of 0.7.
 
 ```{r}
 #| label: ordinal-setup
@@ -449,17 +605,14 @@ m4 <- cmdstanr::cmdstan_model("./stan/logistic.stan")
 cats <- c(
   "death", #  - all cause
   "icu", #  - all cause
-  "hosp rsv+",  
-  "MA rsv+",  
-  "MA rsv-", 
-  "MA rti", 
-  "No MA")
+  "hosp",  
+  "MA",  
+  "no rsv")
 
-p_soc <- c(0.01, 0.01, 0.03, 0.05, 0.05, 0.55, 0.3) 
+
+p_soc <- c(0.01, 0.01, 0.03, 0.1, 0.85) 
 names(p_soc) <- cats
 stopifnot(sum(p_soc) == 1)
-p_soc
-
 
 compute_probs <- function(p_soc, or_new_trt){
   cum_p_soc <- cumsum(p_soc)
@@ -475,16 +628,13 @@ compute_probs <- function(p_soc, or_new_trt){
   m
 }
 
-compute_probs(p_soc, or_new_trt = 0.7)
+round(compute_probs(p_soc, or_new_trt = 0.7), 4)
 
 ```
 
-
-If a set of applicable outcomes could be ranked, then an ordinal outcome might lead to power gains.
-
-Under a cross-sectional perspective, a units' worst state over the 360 days since birth is taken as the observation for that outcome, which is effectively just providing some finer granularity to what was previously an indicator variable. 
-The approach might evaluate treatment effects directly or use the model to estimate probabilities of being at various states. 
-Clearly, we are making additional assumptions here, but we are also leveraging additional information without having to rely on historic data.
+Assume single cross sectional observation for the analysis.
+A units' worst state over the 360 days since birth is taken. 
+The approach might evaluate treatment effects directly or use the model to estimate probabilities of being at various states.
 
 ```{r}
 #| label: ordinal-data
@@ -497,13 +647,12 @@ Clearly, we are making additional assumptions here, but we are also leveraging a
 get_ordinal_data <- function(
     N = 3000, 
     or_new_trt = 0.7,
-    # death, 
-    # hosp rti rsv+, 
-    # hosp rti, 
-    # ma rti rsv+, 
-    # ma rti, 
-    # no ma for rti  
-    p_soc = c(0.01, 0.01, 0.03, 0.05, 0.05, 0.55, 0.3) 
+    # death
+    # icu
+    # hosp 
+    # MA 
+    # no rsv
+    p_soc = c(0.01, 0.01, 0.03, 0.1, 0.85) 
     ){
   
   cum_p_soc <- cumsum(p_soc)  
@@ -529,19 +678,19 @@ get_ordinal_data <- function(
 
 }
 
-# N <- 3000
-# d_trial <- get_ordinal_data(N, or_new_trt)
-# d_smry <- d_trial[, .(p_obs = .N/(N/2)), keyby = .(trt, outcome)]
-# d_smry <- cbind(d_smry, p_tru = c(rev(p_new), rev(p_soc)))
-# d_smry
 ```
 
-Comparison of binary vs ordinal perspective on single data set.
+Based on a single dataset, we can see some improvement in precision on the risk estimates.
 
 ```{r}
+#| label: proportional-odds-vs-logistic
+#| code-summary: Proportional odds vs logistic results based on single data set
+#| code-fold: true
+
+
 d_trial <- get_ordinal_data(N = 3000, 0.7)
-d_trial[outcome == "MA rsv+", y_bin := 1]
-d_trial[outcome != "MA rsv+", y_bin := 0]
+d_trial[outcome == "MA", y_bin := 1]
+d_trial[outcome != "MA", y_bin := 0]
 d_trial[trt == "SoC", x := 0]
 d_trial[trt == "New", x := 1]
 
@@ -552,14 +701,14 @@ h2 <- MASS::polr(outcome ~ x, data = d_trial, Hess = TRUE)
 
 # trt arm
 marginaleffects::predictions(h1, newdata = data.table(x = 0:1), type = "response")
-# compare results to those for MA rsv+ below
+# compare results to those for MA below
 marginaleffects::predictions(h2, newdata = data.table(x = 0:1), type = "probs")
 ```
 
 
 ```{r}
-#| label: ordinal-sim-1
-#| code-summary: Simulation implementation based on ordinal outcome definition 
+#| label: ordinal-sim-implementation
+#| code-summary: Simulation implementation based on ordinal outcome definition
 #| code-fold: true
 
 risk_diff_on_po_opt <- function(or_new_trt, rd_target){
@@ -577,25 +726,77 @@ risk_diff_on_po_opt <- function(or_new_trt, rd_target){
   (rd_target - (p_new[4] - p_soc[4]))^2
 }
 
-# Compute the ORs that are consistent with risk differences that we 
-# have looked at previously.
-p_1_sub <- c(0.0250, 0.0375, 0.0425, 0.0500, 0.0625)
-p_1_sub - p_0
-or_new_trt <- length(p_1_sub)
-for(i in seq_along(p_1_sub)){
+
+get_default_sim_ord_rtn <- function(){
+  d_smry_p  <- CJ(trt = c("SoC", "New"), outcome = cats)
+  d_smry_p[trt == "New", x := 1]
+  d_smry_p[trt == "SoC", x := 0]
+  d_smry_p[, `:=`(
+    N = NA_integer_,
+    p_sim = NA_real_,
+    p_obs = NA_real_,
+    p_mu_ord = NA_real_,
+    p_mu_bin = NA_real_
+  )]
+  setcolorder(d_smry_p, c(
+    "trt", "x", "outcome", "N", "p_sim", "p_obs", "p_mu_ord", "p_mu_bin"
+  ))
   
-  or_new_trt[i] <- optimize(
-    risk_diff_on_po_opt, 
-    c(0, 10), tol = 0.0001, 
-    rd_target = p_1_sub[i] - p_0)$minimum
+  d_smry_rd <- data.table(
+    outcome = cats, rd_sim = NA_real_, rd_obs = NA_real_, 
+    rd_mu_ord = NA_real_, rd_mu_bin = NA_real_, pr_lt_0 = NA_real_
+  )
+  
+  d_smry_b <- data.table(
+    model = c("ordinal", "logistic"),
+    rd_sim = NA_real_,
+    b_sim = NA_real_,
+    b_mu = NA_real_,
+    q_025 = NA_real_,
+    q_975 = NA_real_,
+    pr_lt_0 = NA_real_)
+  
+  return(
+    
+    list(
+      d_smry_p = d_smry_p,
+      d_smry_rd = d_smry_rd,
+      d_smry_b = d_smry_b
+    )
+    
+  )
   
 }
 
-rd_sub <- p_1_sub - p_0
 
-sim_ordinal <- function(){
+N = 3000
+# now the control arm is the distribution across the possible states.
+p_soc = c(0.01, 0.01, 0.03, 0.1, 0.85) 
+p_1 = c(0.07, 0.08, 0.09, 0.1, 0.12)
+n_sim = 200
+
+
+sim_ordinal <- function(
+    N = 3000, # total sample size 
+    p_soc = c(0.01, 0.01, 0.03, 0.1, 0.85)  ,
+    # scenarios characterising treatment group risk for MA rsv+
+    p_1 = c(0.07, 0.08, 0.09, 0.1, 0.12) ,
+    n_sim = 200
+  ){
   
+  # Compute the ORs that are consistent with risk differences that we 
+  # have looked at previously.
+  rd_sub <- p_1 - p_soc[4]
+  or_new_trt <- length(p_1)
+  for(i in seq_along(p_1)){
   
+    or_new_trt[i] <- optimize(
+      risk_diff_on_po_opt, 
+      c(0, 10), tol = 0.0001, 
+      rd_target = p_1[i] - p_soc[4])$minimum
+  
+  }
+
   d_grid <- CJ(trt = c("SoC", "New"), outcome = cats)
   d_grid[, outcome := factor(outcome, levels = cats)]
   
@@ -604,14 +805,13 @@ sim_ordinal <- function(){
   i <- j <- 3
   for(j in seq_along(or_new_trt)){
     
-    l_res[[j]] <- mclapply(1:n_sim, function(i){
+    l_res[[j]] <- pmclapply(1:n_sim, function(i){
       
-      d_trial <- get_ordinal_data(N = 3000, or_new_trt[j])
+      d_trial <- get_ordinal_data(N = N, or_new_trt[j])
       
       d_trial[trt == "New", x := 1]
       d_trial[trt == "SoC", x := 0]
       d_trial <- d_trial[order(x)]
-      
       
       d_trial_grp <- d_trial[, .N, keyby = .(trt, x, outcome)]
       # Accounting for chance that some groups have zero counts
@@ -624,8 +824,8 @@ sim_ordinal <- function(){
       d_trial_grp <- d_trial_grp[order(x)]
       
       d_trial_bin <- copy(d_trial_grp)
-      d_trial_bin[outcome == "MA rsv+", evt := 1]
-      d_trial_bin[outcome != "MA rsv+", evt := 0]
+      d_trial_bin[outcome == "MA", evt := 1]
+      d_trial_bin[outcome != "MA", evt := 0]
       d_trial_bin <- d_trial_bin[, .(N = sum(N)), keyby = .(trt, evt)]
       d_trial_bin <- dcast(d_trial_bin, trt ~ evt, value.var = "N")
       setnames(d_trial_bin, "0", "failure")
@@ -636,162 +836,337 @@ sim_ordinal <- function(){
       d_trial_bin <- d_trial_bin[order(x)]
       d_trial_bin[, p_obs := success/n]
       
-      ld <- list(
-        N = nrow(d_trial_grp),
-        K = length(cats),
-        P = 1,
-        y = as.integer(d_trial_grp$outcome),
-        X = as.matrix(d_trial_grp$x, ncol = 1, drop = F ),
-        wgt = d_trial_grp$N,
-        pri_b_s = 3, pri_cuts_s = 3
-      )
-      
-      f4 <- m3$sample(
-        ld, iter_warmup = 1000, iter_sampling = 2000,
-        parallel_chains = 1, chains = 1, refresh = 0, show_exceptions = F,
-        max_treedepth = 10, adapt_delta = 0.99)
       
       
-      ld <- list(
-        N = nrow(d_trial_bin),
-        y = d_trial_bin$success, n = d_trial_bin$n,
-        X = as.matrix(d_trial_bin$x, ncol = 1, drop = F )
-      )
+      l_ret <- tryCatch({
+        
+        ld <- list(
+          N = nrow(d_trial_grp),
+          K = length(cats),
+          P = 1,
+          y = as.integer(d_trial_grp$outcome),
+          X = as.matrix(d_trial_grp$x, ncol = 1, drop = F ),
+          wgt = d_trial_grp$N,
+          pri_b_s = 3, pri_cuts_s = 3
+        )
+        
+        outname <- paste0(
+          format(Sys.time(), format = "%Y%m%d%H%M%S"),
+          "-ordinal-02-", j, "-", i)
+        
+        f4 <- m3$sample(
+          ld, iter_warmup = 1000, iter_sampling = 2000,
+          parallel_chains = 1, chains = 1, refresh = 0, show_exceptions = F,
+          max_treedepth = 10, adapt_delta = 0.96,
+          output_dir = "/home/mark/Documents/rsv-grant/tmp",
+          output_basename = outname)
       
-      f5 <- m4$sample(
-        ld, iter_warmup = 1000, iter_sampling = 2000,
-        parallel_chains = 1, chains = 1, refresh = 0, show_exceptions = T,
-        max_treedepth = 10, adapt_delta = 0.99)
+        ld <- list(
+          N = nrow(d_trial_bin),
+          y = d_trial_bin$success, n = d_trial_bin$n,
+          X = as.matrix(d_trial_bin$x, ncol = 1, drop = F )
+        )
+        
+        outname <- paste0(
+          format(Sys.time(), format = "%Y%m%d%H%M%S"),
+          "-logistic-", j, "-", i)
+        
+        f5 <- m4$sample(
+          ld, iter_warmup = 1000, iter_sampling = 2000,
+          parallel_chains = 1, chains = 1, refresh = 0, show_exceptions = T,
+          max_treedepth = 10, adapt_delta = 0.95,
+          output_dir = "/home/mark/Documents/rsv-grant/tmp",
+          output_basename = outname)
       
-      d_tmp <- data.table(f4$draws(variables = c("p0", "p1"), format = "matrix"))
-      d_post <- melt(d_tmp, measure.vars = names(d_tmp))
-      d_post[, ix := gsub("p.\\[", "", variable, fixed = F)]
-      d_post[, ix := as.numeric(gsub("\\]", "", ix, fixed = F))]
-      d_post[variable %like% "p0", trt := "SoC"]
-      d_post[variable %like% "p1", trt := "New"]
-      d_smry_ord <- d_post[, .(p_mu_ord = mean(value)), keyby = .(trt, ix)]
-      d_smry_ord[, outcome := cats[length(cats) + 1 -ix]]
-      d_smry_ord[, ix := NULL]
-      d_smry_ord <- merge(d_smry_ord, d_trial_grp, by = c("trt", "outcome"), all = T)
+        if(is.null(f4) || is.null(f5) ){ 
+          
+          if(is.null(f4)){
+            message_parallel("Scenario ", j, " trial ", i, " model issue, f4 is null")  
+          }
+          if(is.null(f5)){
+            message_parallel("Scenario ", j, " trial ", i, " model issue, f5 is null")  
+          }
+          
+          return(get_default_sim_ord_rtn())
+          
+        }
+        
+        # Risks by outcome from ordinal
+        d_tmp <- data.table(f4$draws(variables = c("p0", "p1"), format = "matrix"))
+        d_post <- melt(d_tmp, measure.vars = names(d_tmp))
+        d_post[, ix := gsub("p.\\[", "", variable, fixed = F)]
+        d_post[, ix := as.numeric(gsub("\\]", "", ix, fixed = F))]
+        d_post[variable %like% "p0", trt := "SoC"]
+        d_post[variable %like% "p1", trt := "New"]
+        d_smry_ord <- d_post[, .(p_mu_ord = mean(value)), keyby = .(trt, ix)]
+        d_smry_ord[, outcome := cats[length(cats) + 1 -ix]]
+        d_smry_ord[, ix := NULL]
+        d_smry_ord <- merge(d_smry_ord, d_trial_grp, by = c("trt", "outcome"), all = T)
+        d_smry_ord[, outcome := factor(outcome, levels = cats)]
+        d_smry_ord <- d_smry_ord[order(x, outcome)]
+        d_smry_ord[trt == "SoC", p_sim := p_soc]
+        m_tmp <- compute_probs(p_soc, or_new_trt[j])
+        d_smry_ord[trt == "New", p_sim := m_tmp[rownames(m_tmp) == "p_new", ]]
       
-      d_tmp <- data.table(f5$draws(variables = c("p0", "p1"), format = "matrix"))
-      d_post <- melt(d_tmp, measure.vars = names(d_tmp))
-      d_post[variable %like% "p0", trt := "SoC"]
-      d_post[variable %like% "p1", trt := "New"]
-      d_smry_bin <- d_post[, .(p_mu_bin = mean(value)), keyby = .(trt)]
-      d_smry_bin[, outcome := "MA rsv+"]
+        # Risks by outcome from logistic based on aggregated data
+        d_tmp <- data.table(f5$draws(variables = c("p0", "p1"), format = "matrix"))
+        d_post <- melt(d_tmp, measure.vars = names(d_tmp))
+        d_post[variable %like% "p0", trt := "SoC"]
+        d_post[variable %like% "p1", trt := "New"]
+        d_smry_bin <- d_post[, .(p_mu_bin = mean(value)), keyby = .(trt)]
+        d_smry_bin[, outcome := "MA"]
+        
+        d_smry_p <- merge(d_smry_ord, d_smry_bin, by = c("trt", "outcome"), all.x = T)
+        setcolorder(d_smry_p, c("trt", "x", "outcome", "N", "p_sim", "p_obs", "p_mu_ord", "p_mu_bin"))
+        d_smry_p[, outcome := factor(outcome, levels = cats)]
+        d_smry_p <- d_smry_p[order(outcome, x)]
       
-      d_smry_p <- merge(d_smry_ord, d_smry_bin, by = c("trt", "outcome"), all.x = T)
-      setcolorder(d_smry_p, c("trt", "x", "outcome", "N", "p_obs", "p_mu_ord", "p_mu_bin"))
+        
+        # Risk difference 
+        d_tmp <- data.table(f4$draws(variables = c("rd"), format = "matrix"))
+        d_post <- melt(d_tmp, measure.vars = names(d_tmp))
+        d_post[, ix := gsub("rd\\[", "", variable, fixed = F)]
+        d_post[, ix := as.numeric(gsub("\\]", "", ix, fixed = F))]
+        d_smry_ord <- d_post[, .(rd_mu_ord = mean(value),
+                                 pr_lt_0 = mean(value < 0)
+                                 ), keyby = .(ix)]
+        d_smry_ord[, outcome := cats[length(cats) + 1 -ix]]
+        d_smry_ord[, ix := NULL]
+        d_smry_ord <- merge(
+          d_smry_ord, 
+          dcast(d_trial_grp, outcome ~ trt, value.var = "p_obs")[
+            , .(outcome, rd_obs = New - SoC)], 
+          by = c("outcome"), all = T)
+        d_smry_ord[, outcome := factor(outcome, levels = cats)]
+        
+        d_tmp <- data.table(f5$draws(variables = c("rd"), format = "matrix"))
+        d_post <- melt(d_tmp, measure.vars = names(d_tmp))
+        d_smry_bin <- d_post[, .(rd_mu_bin = mean(value))]
+        d_smry_bin[, outcome := factor("MA", levels = cats)]
+        
+        d_smry_rd <- merge(d_smry_ord, d_smry_bin, by = "outcome", all.x = T)
+        d_smry_rd[, rd_sim := rd_sub[j]]
+        
+        setcolorder(d_smry_rd, c("outcome", "rd_sim", "rd_obs", "rd_mu_ord", "rd_mu_bin"))
+        d_smry_rd[, outcome := factor(outcome, levels = cats)]
+        d_smry_rd <- d_smry_rd[order(outcome)]
+        
+        # Treatment effect
+        d_tmp <- data.table(f4$draws(variables = c("b"), format = "matrix"))
+        d_post <- melt(d_tmp, measure.vars = names(d_tmp))
+        d_smry_ord_b <- d_post[, .(b_mu = mean(value),
+                               q_025 = quantile(value, prob = 0.025),
+                               q_975 = quantile(value, prob = 0.975),
+                               pr_lt_0 = mean(value < 0))]
+        d_smry_ord_b[, b_sim := round(log(or_new_trt[j]), 5)]
+        d_smry_ord_b[, rd_sim := rd_sub[j]]
+        
+              
+        d_tmp <- data.table(f5$draws(variables = c("b"), format = "matrix"))
+        d_post <- melt(d_tmp, measure.vars = names(d_tmp))
+        d_smry_bin_b <- d_post[, .(b_mu = mean(value),
+                               q_025 = quantile(value, prob = 0.025),
+                               q_975 = quantile(value, prob = 0.975),
+                               pr_lt_0 = mean(value < 0))]
+        d_smry_bin_b[, b_sim := NA_real_]
+        d_smry_bin_b[, rd_sim := rd_sub[j]]
+        
+        d_smry_b <- rbind(
+          cbind(model = "ordinal", d_smry_ord_b),
+          cbind(model = "logistic", d_smry_bin_b),
+          fill = T
+        )
+        setcolorder(d_smry_b, c("model", "rd_sim", "b_sim"))
+        
+        
+        list(
+          d_smry_p = d_smry_p,
+          d_smry_rd = d_smry_rd,
+          d_smry_b = d_smry_b
+        )
+        
+      }, warning = function(war) {
+        
+        message_parallel("Scenario ", j, " trial ", i, " warn ", war)  
+        return(get_default_sim_ord_rtn())
+        
+      }, error = function(err) {
+        
+        message_parallel("Scenario ", j, " trial ", i, " err ", err)
+        return(get_default_sim_ord_rtn())
+        
+      }, finally = {
+        # noop
+      } )
       
-      d_smry_p[, outcome := factor(outcome, levels = cats)]
-      d_smry_p <- d_smry_p[order(outcome, x)]
       
       
-      d_tmp <- data.table(f4$draws(variables = c("rd"), format = "matrix"))
-      d_post <- melt(d_tmp, measure.vars = names(d_tmp))
-      d_post[, ix := gsub("rd\\[", "", variable, fixed = F)]
-      d_post[, ix := as.numeric(gsub("\\]", "", ix, fixed = F))]
-      d_smry_ord <- d_post[, .(
-        rd_mu_ord = mean(value),
-        pr_lt_0 = mean(value < 0)
-        ), keyby = .(ix)]
-      d_smry_ord[, outcome := cats[length(cats) + 1 -ix]]
-      d_smry_ord[, ix := NULL]
-      d_smry_ord <- merge(
-        d_smry_ord, 
-        dcast(d_trial_grp, outcome ~ trt, value.var = "p_obs")[, .(outcome, rd_obs = New - SoC)], 
-        by = c("outcome"), all = T)
-      
-      d_tmp <- data.table(f5$draws(variables = c("rd"), format = "matrix"))
-      d_post <- melt(d_tmp, measure.vars = names(d_tmp))
-      d_smry_bin <- d_post[, .(rd_mu_bin = mean(value))]
-      d_smry_bin[, outcome := "MA rsv+"]
-      
-      d_smry_rd <- merge(d_smry_ord, d_smry_bin, by = c("outcome"), all.x = T)
-      d_smry_rd[outcome == "MA rsv+", rd_sim := rd_sub[j]]
-      
-      setcolorder(d_smry_rd, c("outcome", "rd_sim", "rd_obs", "rd_mu_ord", "rd_mu_bin"))
-      d_smry_rd[, outcome := factor(outcome, levels = cats)]
-      d_smry_rd <- d_smry_rd[order(outcome)]
-      
-      
-      d_tmp <- data.table(f4$draws(variables = c("b"), format = "matrix"))
-      d_post <- melt(d_tmp, measure.vars = names(d_tmp))
-      d_smry_ord_b <- d_post[, .(b_mu_bin = mean(value),
-                             q_025 = quantile(value, prob = 0.025),
-                             q_975 = quantile(value, prob = 0.975),
-                             pr_lt_0 = mean(value < 0))]
-      d_smry_ord_b[, b_sim := round(log(or_new_trt[j]), 5)]
-      
-            
-      d_tmp <- data.table(f5$draws(variables = c("b"), format = "matrix"))
-      d_post <- melt(d_tmp, measure.vars = names(d_tmp))
-      d_smry_bin_b <- d_post[, .(b_mu_bin = mean(value),
-                             q_025 = quantile(value, prob = 0.025),
-                             q_975 = quantile(value, prob = 0.975),
-                             pr_lt_0 = mean(value < 0))]
-      
-      
-      d_smry_b <- rbind(
-        cbind(model = "ordinal", d_smry_ord_b),
-        cbind(model = "logistic", d_smry_bin_b),
-        fill = T
-      )
-      setcolorder(d_smry_b, c("model", "b_sim"))
-      
-      list(
-        d_smry_p = d_smry_p,
-        d_smry_rd = d_smry_rd,
-        d_smry_b = d_smry_b
-      )
-      
-    }, mc.cores = mc_cores)
+    }, mc.cores = mc_cores, title = paste0("Ordinal, OR ", or_new_trt[j]))
     
   }
   
   l_res
 }
 
+```
 
 
-l_res_sim <- sim_ordinal()
+```{r}
+#| label: ordinal-sim-processing
+#| code-summary: Process results from simulation for ordinal outcome 
+#| code-fold: true
 
+
+combine_sim_ord_data <- function(
+    l_res_sim
+){
+  
+  d_smry_p <- rbindlist(lapply(1:length(l_res_sim), function(ii) {
+    d_smry_p <- rbindlist(lapply(1:length(l_res_sim[[ii]]), function(jj) {
+      # message("Scenario ", ii, " trial ", jj)
+      l_res_sim[[ii]][[jj]]$d_smry_p
+    }), idcol = "i_sim")
+    d_smry_p
+  }), idcol = "i_scenario")
+  
+  d_smry_rd <- rbindlist(lapply(1:length(l_res_sim), function(ii) {
+    d_smry_rd <- rbindlist(lapply(1:length(l_res_sim[[ii]]), function(jj) {
+      l_res_sim[[ii]][[jj]]$d_smry_rd
+    }), idcol = "i_sim")
+    d_smry_rd
+  }), idcol = "i_scenario")
+  
+  d_smry_b <- rbindlist(lapply(1:length(l_res_sim), function(ii) {
+    d_smry_b <- rbindlist(lapply(1:length(l_res_sim[[ii]]), function(jj) {
+      l_res_sim[[ii]][[jj]]$d_smry_b
+    }), idcol = "i_sim")
+    d_smry_b
+  }), idcol = "i_scenario")
+  
+  return(
+    list(
+      d_smry_p = d_smry_p,
+      d_smry_rd = d_smry_rd,
+      d_smry_b = d_smry_b
+      
+    )
+  )
+  
+}
 
 
 ```
 
 
 ```{r}
-#| label: ordinal-sim-processing
-#| code-summary: Simulation implementation based on ordinal outcome definition 
+#| label: ordinal-sim-1
+#| code-summary: Run simulation at original N = 3000 sample size 
 #| code-fold: true
 
-d_smry_p <- rbindlist(lapply(1:length(l_res_sim), function(ii){
-  d_smry_p <- rbindlist(lapply(1:length(l_res_sim[[jj]]), function(jj){
-    l_res_sim[[ii]][[jj]]$d_smry_p  
-  }), idcol = "i_sim")  
-  d_smry_p
-}), idcol = "i_scenario")
-
-d_smry_rd <- rbindlist(lapply(1:length(l_res_sim), function(ii){
-  d_smry_rd <- rbindlist(lapply(1:length(l_res_sim[[jj]]), function(jj){
-    l_res_sim[[ii]][[jj]]$d_smry_rd  
-  }), idcol = "i_sim")  
-  d_smry_rd
-}), idcol = "i_scenario")
-
-d_smry_b <- rbindlist(lapply(1:length(l_res_sim), function(ii){
-  d_smry_b <- rbindlist(lapply(1:length(l_res_sim[[jj]]), function(jj){
-    l_res_sim[[ii]][[jj]]$d_smry_b  
-  }), idcol = "i_sim")  
-  d_smry_b
-}), idcol = "i_scenario")
-
-
-d_smry_b[, .(pwr = mean(pr_lt_0 > 0.975)), keyby = .(i_scenario, model)]
+N <- 3000
+l_res_sim_1 <- sim_ordinal(
+  N = N, # total sample size 
+  p_soc = c(0.01, 0.01, 0.03, 0.1, 0.85)  ,
+  # scenarios characterising treatment group risk for MA rsv+
+  p_1 = c(0.07, 0.075, 0.08, 0.085, 0.09, 0.1, 0.12) ,
+  n_sim = 5000
+)
 ```
 
+
+```{r}
+#| echo: FALSE
+#| label: fig-pwr-3
+#| fig-cap: 'Power curves (risk difference) showing logistic vs ordinal at original sample size.'
+#| fig.height: 4.5
+#| fig.width: 4.5
+#| fig-pos: H
+
+l_res_comb_1 <- combine_sim_ord_data(l_res_sim_1)
+
+if(any(is.na(l_res_comb_1$d_smry_b$b_mu))){
+  d_tmp <- l_res_comb_1$d_smry_b[is.na(b_mu)]  
+  message("Of the ", nrow(l_res_comb_1$d_smry_b), " simulation results, ", nrow(d_tmp), 
+          " had NA values for the posterior summary for b_mu. These results will be removed.")
+  
+}
+
+d_fig_3 <- l_res_comb_1$d_smry_b[!is.na(b_mu), .(pwr = mean(pr_lt_0 > 0.975)), 
+                                 keyby = .(i_scenario, model, rd_sim)]
+
+
+tit <- sprintf("Power curve (N_trt = %.0f, N_ctl = %.0f)", N/2, N/2)
+ggplot(d_fig_1, aes(x = x_rd, y = win_rd)) +
+  geom_smooth(se = F, lwd = 0.3, col = 1, 
+              method = "gam", formula = y ~ s(x, bs = "ps")) +
+  geom_line(data = d_fig_3,
+             aes(x = rd_sim, y = pwr, col = model, group = model),
+             inherit.aes = F, lwd = 0.3, lty = 2) +
+  geom_point(data = d_fig_3,
+             aes(x = rd_sim, y = pwr, col = model),
+             inherit.aes = F) +
+  scale_y_continuous("Power", limits = c(0, 1), breaks = seq(0, 1, by = 0.1)) +
+  scale_x_continuous("Risk difference (p1-p0)", breaks = seq(-0.03, 0.03, by = 0.01)) +
+  scale_color_discrete("Risk in historic study for RSVpreF") +
+  theme_minimal() +
+  theme(legend.position = "bottom") +
+  ggtitle(tit)
+```
+
+```{r}
+#| label: ordinal-sim-2
+#| code-summary: Run simulation at original N = 2000 sample size 
+#| code-fold: true
+
+
+N = 2000
+l_res_sim_2 <- sim_ordinal(
+  N = N, # total sample size 
+  p_soc = c(0.01, 0.01, 0.03, 0.1, 0.85)  ,
+  # scenarios characterising treatment group risk for MA rsv+
+  p_1 = c(0.07, 0.075, 0.08, 0.085, 0.09, 0.1, 0.12) ,
+  n_sim = 5000
+)
+```
+
+```{r}
+#| echo: FALSE
+#| label: fig-pwr-4
+#| fig-cap: 'Power curves (risk difference) showing logistic vs ordinal at lower sample size.'
+#| fig.height: 4.5
+#| fig.width: 4.5
+#| fig-pos: H
+
+l_res_comb_2 <- combine_sim_ord_data(l_res_sim_2)
+
+if(any(is.na(l_res_comb_2$d_smry_b$b_mu))){
+  d_tmp <- l_res_comb_2$d_smry_b[is.na(b_mu)]  
+  message("Of the ", nrow(l_res_comb_2$d_smry_b), " simulation results, ", nrow(d_tmp), 
+          " had NA values for the posterior summary for b_mu. These results will be removed.")
+  
+}
+
+d_fig_4 <- l_res_comb_2$d_smry_b[!is.na(b_mu), .(pwr = mean(pr_lt_0 > 0.975)), 
+                                 keyby = .(i_scenario, model, rd_sim)]
+
+
+tit <- sprintf("Power curve (N_trt = %.0f, N_ctl = %.0f)", N/2, N/2)
+ggplot(d_fig_1, aes(x = x_rd, y = win_rd)) +
+  geom_smooth(se = F, lwd = 0.3, col = 1, 
+              method = "gam", formula = y ~ s(x, bs = "ps")) +
+  geom_line(data = d_fig_4,
+             aes(x = rd_sim, y = pwr, col = model, group = model),
+             inherit.aes = F, lwd = 0.3, lty = 2) +
+  geom_point(data = d_fig_4,
+             aes(x = rd_sim, y = pwr, col = model),
+             inherit.aes = F) +
+  scale_y_continuous("Power", limits = c(0, 1), breaks = seq(0, 1, by = 0.1)) +
+  scale_x_continuous("Risk difference (p1-p0)", breaks = seq(-0.03, 0.03, by = 0.01)) +
+  scale_color_discrete("Risk in historic study for RSVpreF") +
+  theme_minimal() +
+  theme(legend.position = "bottom") +
+  ggtitle(tit)
+```
 
 <!-- ::: {#refs} -->
 <!-- ::: -->
