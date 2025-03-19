@@ -1,7 +1,7 @@
 ---
 title: "Simulation - RSV study evaluating RSVpreF vs IG"
 author: "maj"
-date: "2024-11-13"
+date: "2025-03-19"
 date-modified: last-modified
 bibliography: refs.bib
 csl: biomed-central.csl
@@ -14,10 +14,14 @@ embed-resources: true
 #| code-fold: true
 
 suppressWarnings(suppressPackageStartupMessages(library(cmdstanr)))
-library(data.table)
 library(ggplot2)
 library(parallel)
 library(mcprogress)
+suppressWarnings(suppressPackageStartupMessages(library(tictoc)))
+
+library(data.table)
+
+tic()
 
 set.seed(92818785)
 # Simulation controls
@@ -81,7 +85,7 @@ Options:
   
 The ordinal perspective is considered as a method to improve efficiency.
 The categories aim to represent a exhaustive and mutually exclusive ranked set.
-An additional category for positive rsv but no medical attendance might be added for completeness.
+An additional category for positive rsv but no medical attendance might be added for completeness but it was unclear if this group would have any units so it has been omitted for now.
 
 ### Estimand
 
@@ -260,7 +264,7 @@ ggplot(d_fig_1, aes(x = x_ve, y = win_ve)) +
 #| code-summary: Configuring inputs for simulation
 #| code-fold: true
     
-n_sim <- 200
+n_sim = 3000
 
 # Only look at subset of original p_1
 p_1_sub <- quantile(p_1, probs = c(0, 0.25, 0.5, 0.75, 1))
@@ -307,9 +311,9 @@ $$
 $\mu$ and $\tau$ represent the between study mean and SD. 
 When $\tau$ is small, all the logits are similar, motivating greater use of the historic information.
 When $\tau$ is large, we have observed high variability in the control rate and thus we do not want to incorporate much of the earlier data.
-Thus leverage on the historic information enters through the degree of shrinkage rather than directly through the likelihood.
+Leveraging the historic information enters through the degree of shrinkage rather than directly through the likelihood.
 
-Quantities such as risk difference and VE are then derived as functions of the above parameters.
+Quantities such as risk difference and VE are derived as functions of the above parameters.
 
 With only a single trial, we have negligible data to inform the distribution of results on RSVpreF at 360 days.
 Therefore, the results are highly dependent on whether the current trial aligns with the historic trial along with the assumptions we make about the trial to trial variability of risk on the RSVpreF arm.
@@ -527,7 +531,7 @@ l_res_sim_1 <- sim_historic_control(
     p_1 = c(0.075, 0.0875, 0.1, 0.1125, 0.125),
     yh = 92, 
     nh = 3495,
-    n_sim = 5000
+    n_sim = 3000
 )
 
 
@@ -539,9 +543,13 @@ l_res_sim_2 <- sim_historic_control(
     p_1 = c(0.075, 0.0875, 0.1, 0.1125, 0.125),
     yh = 350, 
     nh = 3495,
-    n_sim = 5000
+    n_sim = 3000
 )
 ```
+
+@fig-pwr_2-rd suggests there isn't much benefit in using the historic controls via partial pooling. 
+An alternative method for the power prior could be adopted to evaluate whether that shows any improvement. 
+The alternative simply incorporates the prior data into a scaled version of the likelihood.
 
 ```{r}
 #| echo: FALSE
@@ -593,7 +601,7 @@ ggplot(d_fig_1, aes(x = x_rd, y = win_rd)) +
 
 If a set of applicable outcomes could be ranked, then an ordinal outcome might lead to some efficiency and power gains.
 For the sake of the simulation, the following categories and distribution are assumed.
-These are based on a scenario when the treatment effect is an odds ratio of 0.7.
+The example below is based on a situation where the treatment effect is assumed to be an odds ratio equal to 0.7.
 
 ```{r}
 #| label: ordinal-setup
@@ -1069,10 +1077,11 @@ l_res_sim_1 <- sim_ordinal(
   p_soc = c(0.01, 0.01, 0.03, 0.1, 0.85)  ,
   # scenarios characterising treatment group risk for MA rsv+
   p_1 = c(0.07, 0.075, 0.08, 0.085, 0.09, 0.1, 0.12) ,
-  n_sim = 5000
+  n_sim = 3000
 )
 ```
 
+@fig-pwr-3 suggests there is some benefit in running the proportional odds model on the complete data rather than a logistic regression on the dichotomised scale.
 
 ```{r}
 #| echo: FALSE
@@ -1125,9 +1134,11 @@ l_res_sim_2 <- sim_ordinal(
   p_soc = c(0.01, 0.01, 0.03, 0.1, 0.85)  ,
   # scenarios characterising treatment group risk for MA rsv+
   p_1 = c(0.07, 0.075, 0.08, 0.085, 0.09, 0.1, 0.12) ,
-  n_sim = 5000
+  n_sim = 3000
 )
 ```
+
+@fig-pwr-4 suggests that reducing the sample size to 2000 will still produce operating characteristics that are above the original approach.
 
 ```{r}
 #| echo: FALSE
@@ -1167,6 +1178,75 @@ ggplot(d_fig_1, aes(x = x_rd, y = win_rd)) +
   theme(legend.position = "bottom") +
   ggtitle(tit)
 ```
+
+
+```{r}
+#| label: ordinal-sim-3
+#| code-summary: Run simulation at original N = 1000 sample size 
+#| code-fold: true
+
+
+N = 1000
+l_res_sim_3 <- sim_ordinal(
+  N = N, # total sample size 
+  p_soc = c(0.01, 0.01, 0.03, 0.1, 0.85)  ,
+  # scenarios characterising treatment group risk for MA rsv+
+  p_1 = c(0.07, 0.075, 0.08, 0.085, 0.09, 0.1, 0.12) ,
+  n_sim = 3000
+)
+```
+
+@fig-pwr-5 shows the results at a total sample size of 1000.
+
+```{r}
+#| echo: FALSE
+#| label: fig-pwr-5
+#| fig-cap: 'Power curves (risk difference) showing logistic vs ordinal at lower sample size.'
+#| fig.height: 4.5
+#| fig.width: 4.5
+#| fig-pos: H
+
+l_res_comb_3 <- combine_sim_ord_data(l_res_sim_3)
+
+if(any(is.na(l_res_comb_3$d_smry_b$b_mu))){
+  d_tmp <- l_res_comb_3$d_smry_b[is.na(b_mu)]  
+  message("Of the ", nrow(l_res_comb_3$d_smry_b), " simulation results, ", nrow(d_tmp), 
+          " had NA values for the posterior summary for b_mu. These results will be removed.")
+  
+}
+
+d_fig_5 <- l_res_comb_3$d_smry_b[!is.na(b_mu), .(pwr = mean(pr_lt_0 > 0.975)), 
+                                 keyby = .(i_scenario, model, rd_sim)]
+
+
+tit <- sprintf("Power curve (N_trt = %.0f, N_ctl = %.0f)", N/2, N/2)
+ggplot(d_fig_1, aes(x = x_rd, y = win_rd)) +
+  geom_smooth(se = F, lwd = 0.3, col = 1, 
+              method = "gam", formula = y ~ s(x, bs = "ps")) +
+  geom_line(data = d_fig_5,
+             aes(x = rd_sim, y = pwr, col = model, group = model),
+             inherit.aes = F, lwd = 0.3, lty = 2) +
+  geom_point(data = d_fig_5,
+             aes(x = rd_sim, y = pwr, col = model),
+             inherit.aes = F) +
+  scale_y_continuous("Power", limits = c(0, 1), breaks = seq(0, 1, by = 0.1)) +
+  scale_x_continuous("Risk difference (p1-p0)", breaks = seq(-0.03, 0.03, by = 0.01)) +
+  scale_color_discrete("Risk in historic study for RSVpreF") +
+  theme_minimal() +
+  theme(legend.position = "bottom") +
+  ggtitle(tit)
+```
+
+
+```{r}
+#| label: tidy-up
+#| code-summary: Shut down timer
+#| code-fold: true
+
+toc(log = TRUE, quiet = TRUE)
+```
+
+Simulations run: `r unlist(tic.log(format = TRUE))`.
 
 <!-- ::: {#refs} -->
 <!-- ::: -->
