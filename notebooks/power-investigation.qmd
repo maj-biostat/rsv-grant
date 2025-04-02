@@ -1,0 +1,512 @@
+---
+title: "Power gains from proportional odds"
+author: "maj"
+date: "2025-03-19"
+date-modified: last-modified
+bibliography: refs.bib
+csl: biomed-central.csl
+embed-resources: true
+---
+
+Consider a two arm trial with a primary endpoint where the initial focus is on occurrence of all-cause mortality at 6 months for a particularly severe and progressively debilitating disease where mortality is in the order of 7% at 6-months following progression to a particular stage of the disease process.
+
+
+
+```{r}
+#| label: setup
+#| code-summary: Libraries and globals
+#| code-fold: true
+
+suppressWarnings(suppressPackageStartupMessages(library(cmdstanr)))
+library(ggplot2)
+library(parallel)
+library(mcprogress)
+suppressWarnings(suppressPackageStartupMessages(library(tictoc)))
+suppressWarnings(suppressPackageStartupMessages(library(data.table)))
+
+
+
+tic()
+
+set.seed(58126592)
+# Simulation controls
+basedir <- "/Users/mark/Documents/project/penta-pipeline-rsv/src/rsv-grant" # getwd()
+
+# mc_cores <- parallel::detectCores()
+if(unname(Sys.info()[1]) == "Darwin"){
+   mc_cores <- 5
+} else {
+   mc_cores <- 60
+}
+
+
+m1 <- cmdstanr::cmdstan_model("../stan/ordinal-02.stan")
+
+```
+
+
+Calculations for probability of being in each state in each treatment group.
+
+```{r}
+#| label: compute-prob
+#| code-summary: Function for calculating group probabilities
+#| code-fold: true
+
+
+compute_group_probs <- function(
+    # for binary case, supply p_soc = c(p, 1-p)
+    p_soc, 
+    cats,
+    or_trt 
+    ){
+  
+  stopifnot(sum(p_soc) == 1)
+  stopifnot(length(p_soc) == length(cats))
+  
+  K <- length(p_soc)
+  cum_p_soc <- cumsum(p_soc)
+  # Logit transformation of cumulative probabilities for standard treatment
+  lo_cum_probs_soc <- qlogis(cum_p_soc[-K])
+  # Adjust logit cumulative probabilities for new treatment
+  lo_cum_p_trt <- lo_cum_probs_soc + log(or_trt)
+  cum_p_trt <- plogis(lo_cum_p_trt)
+  cum_p_trt <- c(cum_p_trt, 1)  # Ensure last category is 1
+  p_trt <- diff(c(0, cum_p_trt))  # Convert
+  m <- rbind(p_trt, p_soc)  
+  colnames(m) <- cats
+  rownames(m) <- c("trt", "soc")
+  m
+}
+```
+
+Examples for calculating the risks by state (dead/alive etc) by group.
+Note that for all cases, the same OR is used to compute the treatment group risk and the risk difference on death is the same, irrespective of the number of categories used.
+
+```{r}
+#| label: ex-two-state
+#| code-summary: Example group probabilities, two states, e.g. alive vs dead
+#| code-fold: true
+
+p_soc = c(0.07, 0.93)
+cats = c("dead", "alive")
+or_trt = 0.7
+compute_group_probs(p_soc, cats, or_trt)
+```
+
+
+```{r}
+#| label: ex-four-state
+#| code-summary: Example group probabilities, four states
+#| code-fold: true
+
+p_soc = c(0.07, 0.3, 0.43, 0.2)
+cats = c("dead", "icu", "hosp", "non-hosp")
+or_trt = 0.7
+compute_group_probs(p_soc, cats, or_trt)
+```
+
+
+```{r}
+#| label: ex-seven-state
+#| code-summary: Example group probabilities, four states
+#| code-fold: true
+
+p_soc = c(0.07, 0.3, 0.23, 0.15, 0.05, 0.1, 0.1)
+cats = c("dead", "a", "b", "c", "d", "e", "f")
+or_trt = 0.7
+compute_group_probs(p_soc, cats, or_trt)
+```
+
+Data generating function with proportional odds assumption.
+
+```{r}
+#| label: generate-data
+#| code-summary: Function for calculating group probabilities
+#| code-fold: true
+
+N_soc = 500
+N_trt = 500
+# only supports a single historic control for the moment because that
+# is all we have.
+get_data <- function(
+    N_soc = 500, 
+    N_trt = 500, 
+    p_soc = c(0.3, 0.7),
+    cats = c("dead", "alive"),
+    or_trt = 0.7
+    ){
+  
+  m_p <- compute_group_probs(p_soc, cats, or_trt)
+
+  # 1:1 allocation
+  trt <- c(rep("soc", N_soc), rep("trt", N_trt))
+    
+  outcomes <- unlist(lapply(1:length(trt), function(i) {
+    sample(cats, 1, prob = m_p[rownames(m_p) == trt[i], ])
+  }))
+  
+  # table(outcomes, trt)
+  
+  list(
+    d = data.table(trt, outcome = factor(outcomes, levels = rev(cats)))  ,
+    m_p = m_p
+  )  
+  
+
+}
+
+```
+
+Implementation of a simulation, producing parameter estimates for risk and treatment effect for each trial.
+
+```{r}
+#| label: sim-implementation
+#| code-summary: Simulation implementation
+#| code-fold: true
+
+get_default_sim_obj <- function(cats, or_trt){
+  
+  d_smry_p <- CJ(
+    trt = c("soc", "trt"),
+    outcome = cats
+  )
+  d_smry_p[trt == "soc", x := 0]
+  d_smry_p[trt == "trt", x := 1]
+  d_smry_p[, `:=`(N = NA_integer_, p_sim = NA_real_, p_obs = NA_real_, p_mu = NA_real_)]
+  setcolorder(d_smry_p, c("trt", "x", "outcome", "N", "p_sim", "p_obs", "p_mu"))
+  d_smry_p[, outcome := factor(outcome, levels = cats)]
+  d_smry_p <- d_smry_p[order(outcome, x)]
+  
+  d_smry_b <- data.table(
+    b_sim = log(or_trt),
+    b_mu = NA_real_, 
+    q_025 = NA_real_, 
+    q_975 = NA_real_, 
+    pr_lt_0 = NA_real_)
+  
+  list(
+    d_smry_p = d_smry_p,
+    d_smry_b = d_smry_b
+  )
+  
+  
+}
+
+n_sim = 10
+# data generation settings
+N_soc = 500
+N_trt = 500
+p_soc = c(0.07, 0.93)
+cats = c("dead", "alive")
+or_trt = 0.7
+
+sim <- function(
+    n_sim = 10,
+    # data generation settings
+    N_soc = 500, 
+    N_trt = 500, 
+    p_soc = c(0.3, 0.7),
+    cats = c("dead", "alive"),
+    or_trt = 0.7
+    
+  ){
+  
+  # all cats, all groups
+  d_grid <- CJ(trt = c("soc", "trt"), outcome = cats)
+  d_grid[, outcome := factor(outcome, levels = cats)]
+  
+  l_res <- list()
+  
+  i <- 3
+  l_res <- mcprogress::pmclapply(1:n_sim, function(i){
+    
+    l <- get_data(N_soc, N_trt, p_soc, cats, or_trt)
+      
+    l$d[trt == "trt", x := 1]
+    l$d[trt == "soc", x := 0]
+    l$d <- l$d[order(x)]
+    
+    d_trial_grp <- l$d[, .N, keyby = .(trt, x, outcome)]
+    # Accounting for chance that some groups have zero counts
+    d_trial_grp <- merge(d_trial_grp, d_grid, by = c("trt", "outcome"), all.y = T)
+    d_trial_grp[is.na(x) & trt == "trt", x := 1]
+    d_trial_grp[is.na(x) & trt == "soc", x := 0]
+    d_trial_grp[is.na(N), N := 0]
+    d_trial_grp[trt == "trt", p_obs := N / N_trt]
+    d_trial_grp[trt == "soc", p_obs := N / N_soc]
+    d_trial_grp <- d_trial_grp[order(x)]
+    
+    
+    l_ret <- tryCatch({
+      
+      ld <- list(
+        N = nrow(d_trial_grp),
+        K = length(cats),
+        P = 1,
+        y = as.integer(d_trial_grp$outcome),
+        X = as.matrix(d_trial_grp$x, ncol = 1, drop = F ),
+        wgt = d_trial_grp$N,
+        pri_b_s = 3, pri_cuts_s = 3
+      )
+      
+      outname <- paste0(
+        format(Sys.time(), format = "%Y%m%d%H%M%S"),
+        "-ordinal-02-OR-", or_trt, "-", i)
+      
+      f1 <- m1$sample(
+        ld, iter_warmup = 1000, iter_sampling = 2000,
+        parallel_chains = 1, chains = 1, refresh = 0, show_exceptions = F,
+        max_treedepth = 10, adapt_delta = 0.96,
+        output_dir = paste0(basedir, "/tmp"),
+        output_basename = outname)
+    
+      if(is.null(f1)  ){ 
+        
+        if(is.null(f1)){
+          message_parallel("Scenario ", j, " trial ", i, " model issue, f4 is null")  
+        }
+        
+        return(get_default_sim_obj(cats, or_trt))
+        
+      }
+      
+      # Risks by outcome
+      d_tmp <- data.table(f1$draws(variables = c("p0", "p1"), format = "matrix"))
+      d_post <- melt(d_tmp, measure.vars = names(d_tmp))
+      d_post[, ix := gsub("p.\\[", "", variable, fixed = F)]
+      d_post[, ix := as.numeric(gsub("\\]", "", ix, fixed = F))]
+      d_post[variable %like% "p0", trt := "soc"]
+      d_post[variable %like% "p1", trt := "trt"]
+      
+      d_smry_p <- d_post[, .(p_mu = mean(value)), keyby = .(trt, ix)]
+      d_smry_p[, outcome := cats[length(cats) + 1 - ix]]
+      d_smry_p[, ix := NULL]
+      # merge in observations and empirical probability
+      d_smry_p <- merge(d_smry_p, d_trial_grp, by = c("trt", "outcome"), all = T)
+      d_smry_p[, outcome := factor(outcome, levels = cats)]
+      d_smry_p <- d_smry_p[order(x, outcome)]
+      d_smry_p[trt == "soc", p_sim := p_soc]
+      d_smry_p[trt == "trt", p_sim := l$m_p[rownames(l$m_p) == "trt", ]]
+      setcolorder(d_smry_p, c("trt", "x", "outcome", "N", "p_sim", "p_obs", "p_mu"))
+      d_smry_p[, outcome := factor(outcome, levels = cats)]
+      d_smry_p <- d_smry_p[order(outcome, x)]
+      d_smry_p
+      
+      # Treatment effect
+      d_tmp <- data.table(f1$draws(variables = c("b"), format = "matrix"))
+      d_post <- melt(d_tmp, measure.vars = names(d_tmp))
+      d_smry_b <- d_post[, .(b_mu = mean(value),
+                             q_025 = quantile(value, prob = 0.025),
+                             q_975 = quantile(value, prob = 0.975),
+                             pr_lt_0 = mean(value < 0))]
+      d_smry_b[, b_sim := log(or_trt)]
+      setcolorder(d_smry_b, c("b_sim"))
+      d_smry_b
+      
+      list(
+        d_smry_p = d_smry_p,
+        d_smry_b = d_smry_b
+      )
+      
+    }, warning = function(war) {
+      
+      message_parallel("Scenario ", j, " trial ", i, " warn ", war)  
+      return(get_default_sim_obj(cats, or_trt))
+      
+    }, error = function(err) {
+      
+      message_parallel("Scenario ", j, " trial ", i, " err ", err)
+      return(get_default_sim_obj(cats, or_trt))
+      
+    }, finally = {
+      # noop
+    } )
+    
+    
+  }, mc.cores = mc_cores, title = paste0("Ordinal, OR ", or_trt))
+   
+  
+  d_smry_p <- rbindlist(lapply(1:n_sim, function(ii) {
+      # message("Scenario ", ii)
+      l_res[[ii]]$d_smry_p
+    }), idcol = "i_sim")
+  
+  d_smry_b <- rbindlist(lapply(1:n_sim, function(ii) {
+      # message("Scenario ", ii)
+      l_res[[ii]]$d_smry_b
+    }), idcol = "i_sim")
+  
+  list(
+    d_smry_p = d_smry_p,
+    d_smry_b = d_smry_b
+  )
+  
+}
+
+```
+
+
+
+
+```{r, eval = T}
+#| label: ordinal-sim-1
+#| code-summary: Run simulation based on different number of levels in state categorisation at N = 1000 with OR = 0.7
+#| code-fold: true
+
+n_sim <- 1000
+l_res_1 <- sim(
+  n_sim, N_soc = 500, N_trt = 500, 
+  p_soc = c(0.07, 0.93), 
+  cats = c("dead", "alive"),
+  or_trt = 0.7)
+
+l_res_2 <- sim(
+  n_sim, N_soc = 500, N_trt = 500, 
+  p_soc = c(0.07, 0.43, 0.5), 
+  cats = c("dead", "hosp", "not hosp"),
+  or_trt = 0.7)
+
+l_res_3 <- sim(
+  n_sim, N_soc = 500, N_trt = 500, 
+  p_soc = c(0.07, 0.23, 0.2, 0.5), 
+  cats = c("dead", "icu", "hosp", "not hosp"),
+  or_trt = 0.7)
+
+l_res_4 <- sim(
+  n_sim, N_soc = 500, N_trt = 500, 
+  p_soc = c(0.07, 0.23, 0.2, 0.3, 0.2), 
+  cats = c("dead", "icu", "hosp", "out-pt", "not hosp"),
+  or_trt = 0.7)
+
+```
+
+@fig-risk-1 shows the distribution of posterior means (true value is vertical) for risk of death under each approach.
+
+```{r, eval = T}
+#| echo: FALSE
+#| label: fig-risk-1
+#| fig-cap: 'Posterior risk of all cause mortality based on models with increasing levels of granularity in state'
+#| fig.height: 6
+#| fig.width: 6
+#| fig-pos: H
+
+
+d_fig_tru <- rbind(
+  cbind(outcome_levels = "2", l_res_1$d_smry_p[outcome == "dead", .(p_sim = unique(p_sim)), keyby = trt]),
+  cbind(outcome_levels = "3", l_res_2$d_smry_p[outcome == "dead", .(p_sim = unique(p_sim)), keyby = trt]),
+  cbind(outcome_levels = "4", l_res_3$d_smry_p[outcome == "dead", .(p_sim = unique(p_sim)), keyby = trt]),
+  cbind(outcome_levels = "5", l_res_4$d_smry_p[outcome == "dead", .(p_sim = unique(p_sim)), keyby = trt])
+)
+
+d_fig_res <- rbind(
+  cbind(outcome_levels = "2", l_res_1$d_smry_p[outcome == "dead"]),
+  cbind(outcome_levels = "3", l_res_2$d_smry_p[outcome == "dead"]),
+  cbind(outcome_levels = "4", l_res_3$d_smry_p[outcome == "dead"]),
+  cbind(outcome_levels = "5", l_res_4$d_smry_p[outcome == "dead"])
+)
+
+
+ggplot(data = d_fig_res, aes(x = p_mu, group = trt, lty = trt)) +
+  geom_density() +
+  geom_vline(
+    data = d_fig_tru,
+    aes(xintercept = p_sim, group = trt),
+    lwd = 0.2
+  ) + 
+  scale_x_continuous("Risk of death by group") +
+  scale_linetype_discrete("") +
+  theme_minimal() +
+  facet_wrap(~outcome_levels, labeller = label_both) +
+  theme(axis.title.y=element_blank(),
+        axis.text.y=element_blank(),
+        axis.ticks.y=element_blank(),
+        legend.position = "bottom") 
+  
+```
+
+
+@fig-or-1 shows the distribution of posterior means (true value is vertical) for log-odds treatment effect under each approach.
+
+```{r, eval = T}
+#| echo: FALSE
+#| label: fig-or-1
+#| fig-cap: 'Parameter estimates (log-OR) for each model'
+#| fig.height: 6
+#| fig.width: 6
+#| fig-pos: H
+
+d_fig_tru <- rbind(
+  cbind(outcome_levels = "2", l_res_1$d_smry_b[, .(b_sim = unique(b_sim))]),
+  cbind(outcome_levels = "3", l_res_2$d_smry_b[, .(b_sim = unique(b_sim))]),
+  cbind(outcome_levels = "4", l_res_3$d_smry_b[, .(b_sim = unique(b_sim))]),
+  cbind(outcome_levels = "5", l_res_4$d_smry_b[, .(b_sim = unique(b_sim))])
+)
+
+d_fig_res <- rbind(
+  cbind(outcome_levels = "2", l_res_1$d_smry_b),
+  cbind(outcome_levels = "3", l_res_2$d_smry_b),
+  cbind(outcome_levels = "4", l_res_3$d_smry_b),
+  cbind(outcome_levels = "5", l_res_4$d_smry_b)
+)
+
+
+ggplot(data = d_fig_res, aes(x = b_mu)) +
+  geom_density() +
+  geom_vline(
+    data = d_fig_tru,
+    aes(xintercept = b_sim),
+    lwd = 0.2
+  ) + 
+  scale_x_continuous("log-OR") +
+  theme_minimal() +
+  facet_wrap(~outcome_levels, labeller = label_both) +
+  theme(axis.title.y=element_blank(),
+        axis.text.y=element_blank(),
+        axis.ticks.y=element_blank(),
+        legend.position = "bottom") 
+  
+```
+
+Power estimate for each approach at constant sample size and effect size.
+
+```{r, eval = T}
+#| label: pwr-1
+#| code-summary: Estimated power for each outcome definition and model, sample size N = 1000 and OR = 0.7
+#| code-fold: true
+
+data.table(
+  N = N_soc + N_trt,
+  or = 0.7,
+  outcome_levels = paste0(2:5),
+  pwr = c(
+    l_res_1$d_smry_b[, .(pwr = mean(pr_lt_0>0.975))],
+    l_res_2$d_smry_b[, .(pwr = mean(pr_lt_0>0.975))],
+    l_res_3$d_smry_b[, .(pwr = mean(pr_lt_0>0.975))],
+    l_res_4$d_smry_b[, .(pwr = mean(pr_lt_0>0.975))]
+  )
+)
+
+
+
+```
+
+
+
+
+```{r}
+#| label: tidy-up
+#| code-summary: Shut down timer
+#| code-fold: true
+
+toc(log = TRUE, quiet = TRUE)
+```
+
+Simulations run: `r unlist(tic.log(format = TRUE))`.
+
+
+
+
+
+
+
+
