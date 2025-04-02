@@ -364,17 +364,6 @@ do_trial <- function(
 
 }
 
-# n_sim = 1000
-# id_sim = i
-# N = c(2000, 2500, 3000)
-# p0 = 0.1
-# p1_lwr = 0.07
-# p1_upr = 0.07
-# p_thresh_sup = 0.9
-# p_thresh_fut = 0.4
-# p1 <- seq(p1_lwr, p1_upr, length = n_sim)
-# p = c(p0, p1[i])
-
 n_sim <- 1000
 N <- c(2000, 2500, 3000)
 p0 <- 0.1
@@ -385,7 +374,7 @@ id_sim <- 1
 estimation_method <- 1
 
 run_sim_02 <- function(
-    n_sim = 100,
+    n_sim = 1000,
     N = c(2000, 2500, 3000),
     p0 = 0.1,
     p1 = seq(0.07, 0.1, by = 0.01),
@@ -409,6 +398,7 @@ run_sim_02 <- function(
   i <- 1
   p = c(p0, p1[i])
 
+  message("Total simulations to run ", length(p1))
   log_info("Total simulations to run ", length(p1))
 
   l_res <- pmclapply(1:length(p1), function(i){
@@ -427,8 +417,6 @@ run_sim_02 <- function(
   foutname <- paste0(
     format(Sys.time(), format = "%Y%m%d%H%M%S"), "-sim-res.qs")
   qs::qsave(l_res, file = file.path(output_dir_res, foutname))
-
-
 
   toc(log = TRUE, quiet = TRUE)
 
