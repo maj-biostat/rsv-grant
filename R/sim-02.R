@@ -375,7 +375,7 @@ estimation_method <- 1
 
 run_sim_02 <- function(
     n_sim = 1000,
-    N = c(2000, 2500, 3000),
+    N = c(2000, 2250, 2500),
     p0 = 0.1,
     p1 = seq(0.07, 0.1, by = 0.01),
     p_thresh_sup = 0.95,
