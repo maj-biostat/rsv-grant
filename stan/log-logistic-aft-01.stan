@@ -49,8 +49,8 @@ model {
 }
 
 generated quantities {
-  vector[N_pred] surv0;
-  vector[N_pred] surv1;
+  // vector[N_pred] surv0;
+  // vector[N_pred] surv1;
 
   real<lower=0, upper=1> p0_360;
   real<lower=0, upper=1> p1_360;

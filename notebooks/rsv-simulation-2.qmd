@@ -104,7 +104,8 @@ A reference design with single analysis at 3000 dyads has been considered previo
 ```{r}
 
 
-l_res <- qs::qread(file.path(output_dir_res, "20250401184925-sim-res-keep.qs"))
+# l_res <- qs::qread(file.path(output_dir_res, "20250401184925-sim-res-keep.qs"))
+l_res <- qs::qread(file.path(output_dir_res, "20250402104816-sim-res.qs"))
 
 
 d_sim_dat <- rbindlist(lapply(1:length(l_res), function(i){
@@ -158,94 +159,94 @@ ggplot(d_fig[id_analy == 3],
 
 
 
-dd <- d_sim_dat[id_sim == 5]
-dd[, t_fu := max(d_c$t_0) + 360 - t_0]
-dd[, evt := as.numeric(t_fu >= t_evt & t_evt <= 360)]
-# Ensure that the time we use in the analysis stops at the 360 days
-dd[, t_evt_obs := copy(t_evt)]
-# Censored events are set to 360 days
-dd[evt == 0, t_evt_obs := 360]
+# dd <- d_sim_dat[id_sim == 5]
+# dd[, t_fu := max(d_c$t_0) + 360 - t_0]
+# dd[, evt := as.numeric(t_fu >= t_evt & t_evt <= 360)]
+# # Ensure that the time we use in the analysis stops at the 360 days
+# dd[, t_evt_obs := copy(t_evt)]
+# # Censored events are set to 360 days
+# dd[evt == 0, t_evt_obs := 360]
 
-km1 <- survfit(Surv(t_evt_obs, evt) ~ trt, data = dd)
-# Visualize with survminer
-ggsurvplot(km1, data = dd, risk.table = F,
-           break.y.by = 0.025,
-           conf.int = F,   
-           ggtheme = theme_minimal(),
-           ylim = c(0.85, 1))
-
-# trt has to be a factor otherwise flexsurvreg will only plot overall
-dd[, trt := factor(trt)]
-fs1 <- flexsurvreg(Surv(t_evt_obs, evt) ~ trt, data = dd, dist = "llogis")
-print(fs1)
-str(fs1)
-ggflexsurvplot(fs1, data = dd, risk.table = F,
-               break.y.by = 0.025,
-               conf.int = F,   
-               ggtheme = theme_minimal(),
-               ylim = c(0.85, 1))
-
-# Survival probability at day 360
-pllogis(360, shape = exp(fs1$opt$par[1]), scale = exp(fs1$opt$par[2]))
-pllogis(360, shape = exp(fs1$opt$par[1]), scale = exp(fs1$opt$par[2] + fs1$opt$par[3]))
+# km1 <- survfit(Surv(t_evt_obs, evt) ~ trt, data = dd)
+# # Visualize with survminer
+# ggsurvplot(km1, data = dd, risk.table = F,
+#            break.y.by = 0.025,
+#            conf.int = F,   
+#            ggtheme = theme_minimal(),
+#            ylim = c(0.85, 1))
+# 
+# # trt has to be a factor otherwise flexsurvreg will only plot overall
+# dd[, trt := factor(trt)]
+# fs1 <- flexsurvreg(Surv(t_evt_obs, evt) ~ trt, data = dd, dist = "llogis")
+# print(fs1)
+# str(fs1)
+# ggflexsurvplot(fs1, data = dd, risk.table = F,
+#                break.y.by = 0.025,
+#                conf.int = F,   
+#                ggtheme = theme_minimal(),
+#                ylim = c(0.85, 1))
+# 
+# # Survival probability at day 360
+# pllogis(360, shape = exp(fs1$opt$par[1]), scale = exp(fs1$opt$par[2]))
+# pllogis(360, shape = exp(fs1$opt$par[1]), scale = exp(fs1$opt$par[2] + fs1$opt$par[3]))
 
 #
 
-# Prepare data for Stan
-ld <- list(
-  N = nrow(dd),
-  P = 2,
-  X = cbind(1, dd$trt),
-  y = dd$t_evt_obs,
-  event = dd$evt,
-  N_pred = 361,
-  t_surv = 0:360,
-  # hyperparameters
-  mu0_gamma = c(5, 0),
-  sd0_gamma = c(5, 2),
-  rho_shape = 0.5
-)
-
-m1 <- mod_01$sample(
-  ld,
-  init = function() {list(
-    gamma = c(runif(1, 5, 10), runif(1, -1, 1)),
-    shape = runif(1, 0, 4)
-    )},
-  iter_warmup = 1000, iter_sampling = 1000,
-  parallel_chains = 1, chains = 1, refresh = 0, show_exceptions = T,
-  max_treedepth = 10, adapt_delta = 0.95)
-
-print(fs1)
-m1$summary(variables = c("gamma", "shape", "scale0"))
-m1$summary(variables = c("p0_360", "p1_360"))
-
-d_post <- data.table(
-  m1$draws(
-    variables = c("surv0", "surv1"),
-    format = "matrix"))
-
-d_fig <- melt(d_post, measure.vars = names(d_post))  
-d_fig[variable %like% "surv0", trt := 0]
-d_fig[variable %like% "surv1", trt := 1]
-d_fig[, day := gsub("surv.\\[", "", variable)]
-d_fig[, day := as.numeric(gsub("\\]", "", day)) - 1]
-    
-d_fig <- d_fig[, .(
-  mu_surv = mean(value),
-  q_025 = quantile(value, prob = 0.025),
-  q_975 = quantile(value, prob = 0.975)
-), keyby = .(trt, day)]
-d_fig[, trt := factor(trt)]
-
-ggplot(d_fig, aes(x = day, y = mu_surv, group = trt, col = trt))  +
-  geom_line(lwd = 0.2) +
-  scale_x_continuous(limits = c(0, 400)) +
-  scale_y_continuous(
-    "Survival probability",
-    limits = c(0.85, 1), breaks = seq(0.85, 1, by = 0.025)) +
-  theme_minimal() +
-  theme(legend.position = "top")
+# # Prepare data for Stan
+# ld <- list(
+#   N = nrow(dd),
+#   P = 2,
+#   X = cbind(1, dd$trt),
+#   y = dd$t_evt_obs,
+#   event = dd$evt,
+#   N_pred = 361,
+#   t_surv = 0:360,
+#   # hyperparameters
+#   mu0_gamma = c(5, 0),
+#   sd0_gamma = c(5, 2),
+#   rho_shape = 0.5
+# )
+# 
+# m1 <- mod_01$sample(
+#   ld,
+#   init = function() {list(
+#     gamma = c(runif(1, 5, 10), runif(1, -1, 1)),
+#     shape = runif(1, 0, 4)
+#     )},
+#   iter_warmup = 1000, iter_sampling = 1000,
+#   parallel_chains = 1, chains = 1, refresh = 0, show_exceptions = T,
+#   max_treedepth = 10, adapt_delta = 0.95)
+# 
+# print(fs1)
+# m1$summary(variables = c("gamma", "shape", "scale0"))
+# m1$summary(variables = c("p0_360", "p1_360"))
+# 
+# d_post <- data.table(
+#   m1$draws(
+#     variables = c("surv0", "surv1"),
+#     format = "matrix"))
+# 
+# d_fig <- melt(d_post, measure.vars = names(d_post))  
+# d_fig[variable %like% "surv0", trt := 0]
+# d_fig[variable %like% "surv1", trt := 1]
+# d_fig[, day := gsub("surv.\\[", "", variable)]
+# d_fig[, day := as.numeric(gsub("\\]", "", day)) - 1]
+#     
+# d_fig <- d_fig[, .(
+#   mu_surv = mean(value),
+#   q_025 = quantile(value, prob = 0.025),
+#   q_975 = quantile(value, prob = 0.975)
+# ), keyby = .(trt, day)]
+# d_fig[, trt := factor(trt)]
+# 
+# ggplot(d_fig, aes(x = day, y = mu_surv, group = trt, col = trt))  +
+#   geom_line(lwd = 0.2) +
+#   scale_x_continuous(limits = c(0, 400)) +
+#   scale_y_continuous(
+#     "Survival probability",
+#     limits = c(0.85, 1), breaks = seq(0.85, 1, by = 0.025)) +
+#   theme_minimal() +
+#   theme(legend.position = "top")
 #
 
 
@@ -306,7 +307,8 @@ ggplot(
   geom_point(size = 0.4) +
   scale_x_continuous("", c(2000, 2500, 3000)) +
   scale_y_continuous(
-    "Distribution of mean RD") +
+    "Distribution of mean RD", 
+    limits = c(-0.1, 0.1), breaks = seq(-0.1, 0.1, by = 0.02)) +
   theme_minimal() +
   theme(
     legend.position = "bottom",

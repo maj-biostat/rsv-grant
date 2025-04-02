@@ -198,9 +198,13 @@ do_trial <- function(
     # 360 days to gather the full followup, i.e. the last person enrolled will have
     # a follow up of 360 days.
     if(ii == length(N)){
-      d_c[, t_fu := max(d_c$t_0) + 360 - t_0]
+      # Similarly, add a 1/10th day for the last person so that we can include
+      # them in the analysis
+      d_c[, t_fu := max(d_c$t_0) + 360 - t_0 + 0.1]
     } else {
-      d_c[, t_fu := max(d_c$t_0) - t_0]
+      # Last enrolment to trigger the interim will have no followup but add
+      # a 1/10th day so that we can include them in the analysis.
+      d_c[, t_fu := max(d_c$t_0) - t_0 + 0.1]
     }
 
     # In order to see the event occur we need to have followed them for longer
@@ -211,39 +215,23 @@ do_trial <- function(
     # Ensure that the time we use in the analysis stops at the 360 days
     d_c[, t_evt_obs := copy(t_evt)]
     # Censored events are set to 360 days
-    d_c[evt == 0, t_evt_obs := 360]
+    d_c[evt == 0, t_evt_obs := pmin(360, t_fu)]
 
     # Survival approach - log-logistic regression
-
-    # Prepare data for Stan
-    ld <- list(
-      N = nrow(d_c),
-      P = 2,
-      X = cbind(1, d_c$trt),
-      y = d_c$t_evt_obs,
-      event = d_c$evt,
-      N_pred = 361,
-      t_surv = 0:360,
-      # hyperparameters
-      mu0_gamma = c(5, 0),
-      sd0_gamma = c(2, 2),
-      rho_shape = 0.5
-    )
 
     foutname <- paste0(
       format(Sys.time(), format = "%Y%m%d%H%M%S"),
       "-seq-sim", id_sim, "-intrm", ii)
 
-    # MCMC fit - sink to remove the noise
-    # snk <- capture.output(
+
 
     if(estimation_method == 1){
 
-      fs1 <- flexsurvreg(Surv(t_evt_obs, evt) ~ trt, data = dd, dist = "llogis")
+      fs1 <- flexsurvreg(Surv(t_evt_obs, evt) ~ trt, data = d_c, dist = "llogis")
 
       d_post <- data.table(rmvn(1000, fs1$opt$par, fs1$cov))
       names(d_post) <- names(fs1$opt$par)
-      setcolorder(d_post, c("scale", "trt1", "shape"))
+      setcolorder(d_post, c("scale", "trt", "shape"))
       d_post[, shape := exp(shape)]
       names(d_post) <- c(paste0("gamma", 1:2), "shape")
       d_post[, scale0 := exp(gamma1)]
@@ -253,6 +241,21 @@ do_trial <- function(
       d_post[, p1_360 := pllogis(360, shape = shape, scale = scale1)]
 
     } else if(estimation_method %in% 2:3){
+
+      # Prepare data for Stan
+      ld <- list(
+        N = nrow(d_c),
+        P = 2,
+        X = cbind(1, d_c$trt),
+        y = d_c$t_evt_obs,
+        event = d_c$evt,
+        N_pred = 361,
+        t_surv = 0:360,
+        # hyperparameters
+        mu0_gamma = c(5, 0),
+        sd0_gamma = c(2, 2),
+        rho_shape = 0.5
+      )
 
       if(estimation_method == 2){
         # For resolving high pareto values see
@@ -270,6 +273,9 @@ do_trial <- function(
           output_basename = foutname)
 
       } else if(estimation_method == 3){
+
+        # MCMC fit - sink to remove the noise
+        # snk <- capture.output(
 
         m1 <- mod_01$sample(
           ld,
@@ -346,34 +352,6 @@ do_trial <- function(
       continue_trial = F
     }
 
-
-    # m_surv0 <- matrix(NA, ncol = 360, nrow = nrow(d_post))
-    # m_surv1 <- matrix(NA, ncol = 360, nrow = nrow(d_post))
-    # for(vv in 1:nrow(d_post)){
-    #
-    #   m_surv0[vv, ] <- 1/ (1 + (1:360/d_post$scale0[vv])^d_post$shape[vv])
-    #   m_surv1[vv, ] <- 1/ (1 + (1:360/d_post$scale1[vv])^d_post$shape[vv])
-    #
-    # }
-    # d_fig <- rbind(
-    #   cbind(trt = 0, data.table(m_surv0)),
-    #   cbind(trt = 1, data.table(m_surv1))
-    # )
-    # d_fig <- melt(d_fig, id.vars = "trt")
-    # d_fig[, day := as.numeric(gsub("V", "", variable))]
-    #
-    # d_fig <- d_fig[, .(
-    #   mu_surv = mean(value),
-    #   q_025 = quantile(value, prob = 0.025),
-    #   q_975 = quantile(value, prob = 0.975)
-    # ), keyby = .(trt, day)]
-    # d_fig[, trt := factor(trt)]
-    #
-    # ggplot(d_fig, aes(x = day, y = mu_surv, group = trt))  +
-    #   geom_line(lwd = 0.2) +
-    #   theme_minimal()
-
-
   }
 
 
@@ -404,9 +382,10 @@ p1 <- seq(0.07, 0.1, by = 0.01)
 p_thresh_sup <- 0.95
 p_thresh_fut <- 0.30
 id_sim <- 1
+estimation_method <- 1
 
 run_sim_02 <- function(
-    n_sim = 1000,
+    n_sim = 100,
     N = c(2000, 2500, 3000),
     p0 = 0.1,
     p1 = seq(0.07, 0.1, by = 0.01),
@@ -434,12 +413,14 @@ run_sim_02 <- function(
 
   l_res <- pmclapply(1:length(p1), function(i){
 
-    do_trial(
+    l_trial <- do_trial(
       id_sim = i, N = N,
       p = c(p0, p1[i]),
       p_thresh_sup = 0.96, p_thresh_fut = 0.35,
       estimation_method = 1
     )
+
+    l_trial
 
   }, mc.cores = mc_cores, title = paste0("Sequential trial simulation"))
 
