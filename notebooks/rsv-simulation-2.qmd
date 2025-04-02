@@ -1,0 +1,340 @@
+---
+title: "Simulation - RSV study evaluating RSVpreF vs IG"
+subtitle: "Sequential analyses"
+author: "maj"
+date: "2025-03-28"
+date-modified: last-modified
+bibliography: refs.bib
+csl: biomed-central.csl
+embed-resources: true
+---
+
+```{r}  
+#| label: setup
+#| code-summary: Libraries and globals
+#| code-fold: true
+
+suppressWarnings(suppressPackageStartupMessages(library(cmdstanr)))
+library(ggplot2)
+library(parallel)
+library(mcprogress)
+suppressWarnings(suppressPackageStartupMessages(library(tictoc)))
+
+library(poisson)
+library(data.table)
+library(survival)
+library(flexsurv)
+library(extraDistr)
+
+tic()
+
+set.seed(92818785)
+
+mc_cores <- 60
+
+tok <- unlist(tstrsplit(getwd(), split = "/"))
+if(tok[length(tok)] == "rsv-grant"){
+  mod_01 <- cmdstanr::cmdstan_model("./stan/log-logistic-aft-01.stan")
+} else {
+  mod_01 <- cmdstanr::cmdstan_model("../stan/log-logistic-aft-01.stan")
+}
+
+output_dir_mcmc <- paste0(getwd(), "/tmp")
+output_dir_res <- paste0(getwd(), "/out")
+
+```
+
+## Background
+
+### Aim
+
+We want to compare effectiveness of IG vs RSVpreF for protection against RSV in the first 360 days of life.
+
+### Interventions
+
++ IG - monoclonal antibody given to infant at birth
++ RSVpreF - maternal vaccine given after 32 weeks gestation
+
+### Randomisation
+
+Balanced 1:1 randomisation. 
+Variations might be warranted under the use of historical controls.
+
+### Primary outcome
+
+Options:
+
++ binary outcome variable indicating medically attended per the definition of MATISSE study:
+
+  + MA-RTI visit AND RSV-positive test result AND one or more of the following
+    + Fast breathing (RR $\ge 60$  bpm for $<2$  months of age [$<60$ days of age], $\ge 50$ bpm for $2 - <12$ months of age, or $\ge 40$ bpm for 12–24 months of age)
+    + SpO2 $<95%$
+    + Chest wall indrawing
+
+### Estimand
+
+Primary: population perspective, i.e. the estimated comparative effectiveness of each implemented strategy with adherence as observed under real-world conditions.
+
+### Follow up
+
+Follow up to age 360 days for both groups.
+
+### Prior information
+
+Weakly regularising priors are adopted as soft-constraints on all model parameters.
+
+### Resource Constraints
+
+Sample size up to approximately 3000 dyads.
+
+## Methods
+
+Here we consider a single interim analysis assessing futility and superiority as stopping criteria followed by a final analysis at the maximum sample size.
+Variations on this adaptation might consider sample size re-estimation.
+
+## Operating characteristics
+
+### Reference design
+
+A reference design with single analysis at 3000 dyads has been considered previously.
+
+### Sequential design
+
+
+```{r}
+
+
+l_res <- qs::qread(file.path(output_dir_res, "20250401184925-sim-res-keep.qs"))
+
+
+d_sim_dat <- rbindlist(lapply(1:length(l_res), function(i){
+  l_res[[i]]$d
+}), idcol = "id_sim")
+
+d_sim_res <- rbindlist(lapply(1:length(l_res), function(i){
+  l_res[[i]]$d_pars
+}), idcol = "id_sim")
+
+d_sim_res[, sup := fifelse(pr_drmst_gt_0 > p_sup, 1, 0)]
+d_sim_res[, fut := fifelse(pr_drmst_gt_0 < p_fut, 1, 0)]
+# 
+# d_sim_res[id_analy == 2, N_enrol := 2500]
+# d_sim_res[id_analy == 3, N_enrol := 3000]
+
+# The static imputation allows us to get unbiased summaries over all interim
+# analyses. Because of the potential for early stopping, later interim analyses
+# do not reflect a random selection and therefore the summary results would be
+# biased.
+d_sim_res[, sup := nafill(sup, type = "locf"), keyby = id_sim]
+d_sim_res[, fut := nafill(fut, type = "locf"), keyby = id_sim]
+d_sim_res[, mu_rmst0 := nafill(mu_rmst0, type = "locf"), keyby = id_sim]
+d_sim_res[, mu_rmst1 := nafill(mu_rmst1, type = "locf"), keyby = id_sim]
+d_sim_res[, mu_drmst := nafill(mu_drmst, type = "locf"), keyby = id_sim]
+d_sim_res[, p0_360 := nafill(p0_360, type = "locf"), keyby = id_sim]
+d_sim_res[, p1_360 := nafill(p1_360, type = "locf"), keyby = id_sim]
+d_sim_res[, rd_360 := nafill(rd_360, type = "locf"), keyby = id_sim]
+d_sim_res[, p0_sim := nafill(p0_sim, type = "locf"), keyby = id_sim]
+d_sim_res[, p1_sim := nafill(p1_sim, type = "locf"), keyby = id_sim]
+d_sim_res[, rd_sim := p1_sim - p0_sim]
+
+d_sim_res[, .(id_sim, id_analy, p0_sim, p1_sim, 
+              rd_sim, rd_360, 
+              mu_rmst0, mu_rmst1, pr_drmst_gt_0,
+              sup, fut)]
+
+
+# plot survival curves based on expectation of posterior means
+d_fig <- d_sim_res[, .(id_sim, id_analy, N = N_enrol, 
+                       p0_sim, p1_sim, p0_360, p1_360,
+                       sup, fut)]
+
+d_fig[p0_360 < 0.075 & id_analy == 3 & sup != 1]
+d_fig[id_sim == 2]
+ggplot(d_fig[id_analy == 3],
+       aes(x = 0, y = p0_360)) +
+  geom_point()
+
+
+
+
+
+dd <- d_sim_dat[id_sim == 5]
+dd[, t_fu := max(d_c$t_0) + 360 - t_0]
+dd[, evt := as.numeric(t_fu >= t_evt & t_evt <= 360)]
+# Ensure that the time we use in the analysis stops at the 360 days
+dd[, t_evt_obs := copy(t_evt)]
+# Censored events are set to 360 days
+dd[evt == 0, t_evt_obs := 360]
+
+km1 <- survfit(Surv(t_evt_obs, evt) ~ trt, data = dd)
+# Visualize with survminer
+ggsurvplot(km1, data = dd, risk.table = F,
+           break.y.by = 0.025,
+           conf.int = F,   
+           ggtheme = theme_minimal(),
+           ylim = c(0.85, 1))
+
+# trt has to be a factor otherwise flexsurvreg will only plot overall
+dd[, trt := factor(trt)]
+fs1 <- flexsurvreg(Surv(t_evt_obs, evt) ~ trt, data = dd, dist = "llogis")
+print(fs1)
+str(fs1)
+ggflexsurvplot(fs1, data = dd, risk.table = F,
+               break.y.by = 0.025,
+               conf.int = F,   
+               ggtheme = theme_minimal(),
+               ylim = c(0.85, 1))
+
+# Survival probability at day 360
+pllogis(360, shape = exp(fs1$opt$par[1]), scale = exp(fs1$opt$par[2]))
+pllogis(360, shape = exp(fs1$opt$par[1]), scale = exp(fs1$opt$par[2] + fs1$opt$par[3]))
+
+#
+
+# Prepare data for Stan
+ld <- list(
+  N = nrow(dd),
+  P = 2,
+  X = cbind(1, dd$trt),
+  y = dd$t_evt_obs,
+  event = dd$evt,
+  N_pred = 361,
+  t_surv = 0:360,
+  # hyperparameters
+  mu0_gamma = c(5, 0),
+  sd0_gamma = c(5, 2),
+  rho_shape = 0.5
+)
+
+m1 <- mod_01$sample(
+  ld,
+  init = function() {list(
+    gamma = c(runif(1, 5, 10), runif(1, -1, 1)),
+    shape = runif(1, 0, 4)
+    )},
+  iter_warmup = 1000, iter_sampling = 1000,
+  parallel_chains = 1, chains = 1, refresh = 0, show_exceptions = T,
+  max_treedepth = 10, adapt_delta = 0.95)
+
+print(fs1)
+m1$summary(variables = c("gamma", "shape", "scale0"))
+m1$summary(variables = c("p0_360", "p1_360"))
+
+d_post <- data.table(
+  m1$draws(
+    variables = c("surv0", "surv1"),
+    format = "matrix"))
+
+d_fig <- melt(d_post, measure.vars = names(d_post))  
+d_fig[variable %like% "surv0", trt := 0]
+d_fig[variable %like% "surv1", trt := 1]
+d_fig[, day := gsub("surv.\\[", "", variable)]
+d_fig[, day := as.numeric(gsub("\\]", "", day)) - 1]
+    
+d_fig <- d_fig[, .(
+  mu_surv = mean(value),
+  q_025 = quantile(value, prob = 0.025),
+  q_975 = quantile(value, prob = 0.975)
+), keyby = .(trt, day)]
+d_fig[, trt := factor(trt)]
+
+ggplot(d_fig, aes(x = day, y = mu_surv, group = trt, col = trt))  +
+  geom_line(lwd = 0.2) +
+  scale_x_continuous(limits = c(0, 400)) +
+  scale_y_continuous(
+    "Survival probability",
+    limits = c(0.85, 1), breaks = seq(0.85, 1, by = 0.025)) +
+  theme_minimal() +
+  theme(legend.position = "top")
+#
+
+
+d_fig <- d_sim_res[, .(id_sim, id_analy, N = N_enrol, rd_sim, sup, fut)]
+
+d_fig[, mean(sup), keyby = .(N, rd_sim)]
+p0 <- sort(unique(d_sim_res$p0_sim))
+stopifnot(length(p0) == 1)
+p1_uniq <- sort(unique(d_sim_res$p1_sim))
+d_fig[, rd_sim := factor(rd_sim, levels = p1_uniq - p0)]
+
+d_fig <- rbind(
+  cbind(decision = "Superiority", d_fig[, .(pr_dec = mean(sup)), keyby = .(N, rd_sim)]),
+  cbind(decision = "Futility", d_fig[, .(pr_dec = mean(fut)), keyby = .(N, rd_sim)])
+)
+d_fig[, decision := factor(decision, levels = c("Superiority", "Futility"))]
+
+ggplot(
+  d_fig, 
+  aes(x = N, y = pr_dec, group = rd_sim, col = rd_sim)) +
+  geom_line() +
+  geom_point(size = 0.5) +
+  scale_color_discrete("RD (day 360)") +
+  scale_x_continuous("", c(2000, 2500, 3000)) +
+  scale_y_continuous(
+    "Cumulative probability of decision", limits = c(0, 1),
+    breaks = seq(0, 1, by = 0.1)) +
+  theme_minimal() +
+  theme(
+    legend.position = "right",
+    axis.text.x = element_text(angle = 45, vjust = 1, hjust=1)
+  ) +
+    guides(col=guide_legend(ncol=1)) +
+  facet_wrap(~decision, labeller = label_both) +
+  ggtitle("Cumulative probability of decision by enrolment size:")
+
+
+
+
+d_fig <- d_sim_res[, .(id_sim, id_analy, N = N_enrol, rd_sim, rd_360, sup, fut)]
+d_fig <- melt(
+  d_fig[
+    , .(N, rd_sim, rd_360)], 
+  measure.vars = c("rd_360"),
+  value.name = "mu_rd")
+d_fig[, rd_sim := factor(rd_sim, levels = p1_uniq - p0)]
+
+d_fig <- d_fig[, .(
+  mu_rd = mean(mu_rd),
+  q_025 = quantile(mu_rd, prob = 0.025),
+  q_975 = quantile(mu_rd, prob = 0.975)
+), keyby = .(N, rd_sim)]
+
+ggplot(
+  d_fig, 
+  aes(x = N, y = mu_rd)) +
+  geom_linerange(aes(ymin = q_025, ymax = q_975), lwd = 0.3) +
+  geom_point(size = 0.4) +
+  scale_x_continuous("", c(2000, 2500, 3000)) +
+  scale_y_continuous(
+    "Distribution of mean RD") +
+  theme_minimal() +
+  theme(
+    legend.position = "bottom",
+    axis.text.x = element_text(angle = 45, vjust = 1, hjust=1)
+  ) +
+  guides(fill=guide_legend(nrow=4)) +
+  facet_wrap(~rd_sim, labeller = label_both)
+
+```
+
+
+
+
+
+```{r}
+#| label: tidy-up
+#| code-summary: Shut down timer
+#| code-fold: true
+
+toc(log = TRUE, quiet = TRUE)
+```
+
+Simulations run: `r unlist(tic.log(format = TRUE))`.
+
+<!-- ::: {#refs} -->
+<!-- ::: -->
+
+
+
+
+
