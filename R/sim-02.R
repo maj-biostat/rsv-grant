@@ -93,7 +93,8 @@ do_trial <- function(
     p_thresh_sup = 0.95,
     p_thresh_fut = 0.30,
     # 1 = flexsurvreg, 2 = pathfinder, 3 = mcmc
-    estimation_method = 1
+    estimation_method = 1,
+    mcmc_ptcls = 1000
 ){
 
   log_info(paste0(match.call()[[1]]), " sim ", id_sim)
@@ -106,6 +107,14 @@ do_trial <- function(
   # Start and end indexes
   is <- c(0, cumsum(N_c)[-length(N_c)]) + 1
   ie <- cumsum(N_c)
+
+  if(length(p_thresh_sup) == 1){
+    p_thresh_sup = rep(p_thresh_sup, length(N))
+  }
+
+  if(length(p_thresh_fut) == 1){
+    p_thresh_fut = rep(p_thresh_fut, length(N))
+  }
 
   # For simplicity just start the follow up clock at the time of birth.
   t_0 <- c(0, poisson::nhpp.event.times(
@@ -229,7 +238,7 @@ do_trial <- function(
 
       fs1 <- flexsurvreg(Surv(t_evt_obs, evt) ~ trt, data = d_c, dist = "llogis")
 
-      d_post <- data.table(rmvn(1000, fs1$opt$par, fs1$cov))
+      d_post <- data.table(rmvn(mcmc_ptcls, fs1$opt$par, fs1$cov))
       names(d_post) <- names(fs1$opt$par)
       setcolorder(d_post, c("scale", "trt", "shape"))
       d_post[, shape := exp(shape)]
@@ -283,7 +292,7 @@ do_trial <- function(
             gamma = c(runif(1, 5, 10), runif(1, -1, 1)),
             shape = runif(1, 0, 4)
           )},
-          iter_warmup = 1000, iter_sampling = 1000,
+          iter_warmup = 1000, iter_sampling = mcmc_ptcls,
           parallel_chains = 1, chains = 1, refresh = 0, show_exceptions = T,
           max_treedepth = 10, adapt_delta = 0.95,
           output_dir = output_dir_mcmc,
@@ -322,8 +331,8 @@ do_trial <- function(
       N_enrol = N[ii],
       p0_sim = p[1],
       p1_sim = p[2],
-      p_sup = p_thresh_sup,
-      p_fut = p_thresh_fut,
+      p_sup = p_thresh_sup[ii],
+      p_fut = p_thresh_fut[ii],
       mu_rmst0 = mean(d_rmst$trt0),
       mu_rmst1 = mean(d_rmst$trt1),
       mu_drmst = mean(d_rmst$trt1 - d_rmst$trt0),
@@ -340,8 +349,8 @@ do_trial <- function(
     )]
 
     # test for superiority and futility conditionss
-    if(d_pars[id_analy == ii, pr_drmst_gt_0 > p_thresh_sup] |
-       d_pars[id_analy == ii, pr_drmst_gt_0 < p_thresh_fut]
+    if(d_pars[id_analy == ii, pr_drmst_gt_0 > p_thresh_sup[ii]] |
+       d_pars[id_analy == ii, pr_drmst_gt_0 < p_thresh_fut[ii]]
     ){
       continue_trial = F
     } else {
@@ -374,12 +383,12 @@ id_sim <- 1
 estimation_method <- 1
 
 run_sim_02 <- function(
-    n_sim = 1000,
+    n_sim = 2000,
     N = c(2000, 2250, 2500),
     p0 = 0.1,
     p1 = seq(0.07, 0.1, by = 0.01),
-    p_thresh_sup = 0.95,
-    p_thresh_fut = 0.30
+    p_thresh_sup = 0.96,
+    p_thresh_fut = 0.35
 ){
 
   log_info(paste0(match.call()[[1]]))
@@ -406,8 +415,10 @@ run_sim_02 <- function(
     l_trial <- do_trial(
       id_sim = i, N = N,
       p = c(p0, p1[i]),
-      p_thresh_sup = 0.96, p_thresh_fut = 0.35,
-      estimation_method = 1
+      p_thresh_sup = c(0.99, 0.97, 0.95),
+      p_thresh_fut = c(0.35, 0.35, 0.35),
+      estimation_method = 1,
+      mcmc_ptcls = 2000
     )
 
     l_trial
