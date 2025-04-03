@@ -114,7 +114,7 @@ RMST can be estimated by integrating the survival curves to day 360 and then the
 
 Within this simulation, the probability thresholds for superiority and futilty were:
 
-+ Superiority 0.99, 0.98, 0.97, 0.96 from first to last analysis respectively with the last analysis undertaken once all participants have completed 360 days follow up and 
++ Superiority 0.99, 0.98, 0.98, 0.9725 from first to last analysis respectively with the last analysis undertaken once all participants have completed 360 days follow up and 
 + Futility 0.35 at all analyses
 
 These were used for comparing the difference in RMST relative to a zero reference point; superiority looking for extended RMST in the treatment group and futility looking for reduced RMST.
