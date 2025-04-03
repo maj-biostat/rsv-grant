@@ -2,7 +2,7 @@
 title: "Simulation - RSV study evaluating RSVpreF vs IG"
 subtitle: "Sequential analyses"
 author: "maj"
-date: "2025-04-02"
+date: "2025-04-03"
 date-modified: last-modified
 bibliography: refs.bib
 csl: biomed-central.csl
@@ -24,6 +24,8 @@ suppressWarnings(suppressPackageStartupMessages(library(data.table)))
 library(survival)
 library(flexsurv)
 suppressWarnings(suppressPackageStartupMessages(library(extraDistr)))
+
+suppressPackageStartupMessages(suppressWarnings(library("gt")))
 
 tic()
 
@@ -112,7 +114,7 @@ RMST can be estimated by integrating the survival curves to day 360 and then the
 
 Within this simulation, the probability thresholds for superiority and futilty were:
 
-+ Superiority 0.99, 0.97, 0.95 at the first, second and third analysis respectively and 
++ Superiority 0.99, 0.98, 0.97, 0.96 from first to last analysis respectively with the last analysis undertaken once all participants have completed 360 days follow up and 
 + Futility 0.35 at all analyses
 
 These were used for comparing the difference in RMST relative to a zero reference point; superiority looking for extended RMST in the treatment group and futility looking for reduced RMST.
@@ -139,7 +141,7 @@ The alternative approach is to adopt a survival perspective as is done here.
 #| code-summary: Result set
 #| code-fold: true
 
-l_res <- qs::qread(file.path(output_dir_res, "20250402140442-sim-res.qs"))
+l_res <- qs::qread(file.path(output_dir_res, "20250403171118-sim-res.qs"))
 
 
 d_sim_dat <- rbindlist(lapply(1:length(l_res), function(i){
@@ -175,9 +177,16 @@ d_sim_res[, rd_sim := p1_sim - p0_sim]
 p0 <- sort(unique(d_sim_res$p0_sim))
 stopifnot(length(p0) == 1)
 p1_uniq <- sort(unique(d_sim_res$p1_sim))
+
+
+
+N_tick <- sort(unique(d_sim_res$N_enrol))
+
+N_sims <- d_sim_res[id_analy == 1, .N, keyby = .(p1_sim)][, unique(N)]
 ```
 
-@fig-pwr_1 shows the cumulative probability of superiority/futility by interim and by risk difference at day 360 with a maximum sample size of 3000 and two interim analyses.
+
+@fig-pwr_1 shows the cumulative probability of superiority/futility by interim and by risk difference at day 360 with a maximum sample size of 3000 and two interim analyses (number of simulations `r N_sims`).
 
 ```{r}
 #| echo: FALSE
@@ -204,9 +213,9 @@ ggplot(
   d_fig, 
   aes(x = N, y = pr_dec, group = rd_sim, col = rd_sim)) +
   geom_line() +
-  geom_point(size = 0.5) +
+  geom_point(size = 0.7) +
   scale_color_discrete("RD (day 360)") +
-  scale_x_continuous("", c(2000, 2500, 3000)) +
+  scale_x_continuous("", breaks = N_tick) +
   scale_y_continuous(
     "Cumulative probability of decision", limits = c(0, 1),
     breaks = seq(0, 1, by = 0.1)) +
@@ -224,6 +233,38 @@ ggplot(
 
 
 
+```
+
+
+```{r}
+#| echo: FALSE
+#| label: tbl-pwr1
+#| tbl-pos: H
+#| tbl-cap: "Cumulative probability of decision by decision type, enrolments and difference in cumulative incidence at day 360"
+
+
+d_tbl <- d_sim_res[, .(id_sim, id_analy, N = N_enrol, rd_sim, sup, fut)]
+
+d_tbl_sup <- dcast(
+  d_tbl[, .(pr_decision = mean(sup)), keyby = .(N, rd_sim)],
+  N ~ rd_sim, value.var = "pr_decision"
+)
+
+d_tbl <- d_sim_res[, .(id_sim, id_analy, N = N_enrol, rd_sim, sup, fut)]
+d_tbl_fut <- dcast(
+  d_tbl[, .(pr_decision = mean(fut)), keyby = .(N, rd_sim)],
+  N ~ rd_sim, value.var = "pr_decision"
+)
+
+d_tbl <- rbind(
+  cbind(descision = "Superiority", d_tbl_sup),
+  cbind(descision = "Futility", d_tbl_fut)
+)
+
+gt(d_tbl) |>
+  tab_options(
+    table.font.size = "80%"
+  ) 
 ```
 
 
@@ -257,7 +298,7 @@ ggplot(
   d_fig, 
   aes(x = N, y = mu_rd)) +
   geom_linerange(aes(ymin = q_025, ymax = q_975), lwd = 0.3) +
-  geom_point(size = 0.4) +
+  geom_point(size = 0.7) +
   scale_x_continuous("", c(2000, 2500, 3000)) +
   scale_y_continuous(
     "Distribution of mean RD", 
@@ -332,7 +373,7 @@ ggplot(
 #| code-summary: Result set
 #| code-fold: true
 
-l_res <- qs::qread(file.path(output_dir_res, "20250402142629-sim-res.qs"))
+l_res <- qs::qread(file.path(output_dir_res, "20250403171938-sim-res.qs"))
 
 
 d_sim_dat <- rbindlist(lapply(1:length(l_res), function(i){
@@ -365,13 +406,18 @@ d_sim_res[, p0_sim := nafill(p0_sim, type = "locf"), keyby = id_sim]
 d_sim_res[, p1_sim := nafill(p1_sim, type = "locf"), keyby = id_sim]
 d_sim_res[, rd_sim := p1_sim - p0_sim]
 
+
 p0 <- sort(unique(d_sim_res$p0_sim))
 stopifnot(length(p0) == 1)
 p1_uniq <- sort(unique(d_sim_res$p1_sim))
+
+
+N_tick <- sort(unique(d_sim_res$N_enrol))
+N_sims <- d_sim_res[id_analy == 1, .N, keyby = .(p1_sim)][, unique(N)]
 ```
 
 
-@fig-pwr_2 shows the cumulative probability of superiority/futility by interim and by risk difference at day 360 with a maximum sample size of 2500 and two interim analyses.
+@fig-pwr_2 shows the cumulative probability of superiority/futility by interim and by risk difference at day 360 with a maximum sample size of 2500 and two interim analyses (number of simulations `r N_sims`).
 
 ```{r}
 #| echo: FALSE
@@ -398,9 +444,9 @@ ggplot(
   d_fig, 
   aes(x = N, y = pr_dec, group = rd_sim, col = rd_sim)) +
   geom_line() +
-  geom_point(size = 0.5) +
+  geom_point(size = 0.7) +
   scale_color_discrete("RD (day 360)") +
-  scale_x_continuous("", c(2000, 2250, 2500)) +
+  scale_x_continuous("", breaks = N_tick) +
   scale_y_continuous(
     "Cumulative probability of decision", limits = c(0, 1),
     breaks = seq(0, 1, by = 0.1)) +
@@ -418,6 +464,39 @@ ggplot(
 
 
 
+```
+
+
+
+```{r}
+#| echo: FALSE
+#| label: tbl-pwr2
+#| tbl-pos: H
+#| tbl-cap: "Cumulative probability of decision by decision type, enrolments and difference in cumulative incidence at day 360"
+
+
+d_tbl <- d_sim_res[, .(id_sim, id_analy, N = N_enrol, rd_sim, sup, fut)]
+
+d_tbl_sup <- dcast(
+  d_tbl[, .(pr_decision = mean(sup)), keyby = .(N, rd_sim)],
+  N ~ rd_sim, value.var = "pr_decision"
+)
+
+d_tbl <- d_sim_res[, .(id_sim, id_analy, N = N_enrol, rd_sim, sup, fut)]
+d_tbl_fut <- dcast(
+  d_tbl[, .(pr_decision = mean(fut)), keyby = .(N, rd_sim)],
+  N ~ rd_sim, value.var = "pr_decision"
+)
+
+d_tbl <- rbind(
+  cbind(descision = "Superiority", d_tbl_sup),
+  cbind(descision = "Futility", d_tbl_fut)
+)
+
+gt(d_tbl) |>
+  tab_options(
+    table.font.size = "80%"
+  ) 
 ```
 
 

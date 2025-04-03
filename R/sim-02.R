@@ -10,6 +10,9 @@ log_appender(appender_file(f_log))
 # message(Sys.time(), " Log file initialised ", f_log)
 log_info("*** START UP ***")
 
+log_threshold(INFO)
+# log_threshold(DEBUG)
+
 suppressWarnings(suppressPackageStartupMessages(library(cmdstanr)))
 library(ggplot2)
 library(parallel)
@@ -67,6 +70,8 @@ get_default_return_obj <- function(N){
     # probability thresholds
     pr_drmst_gt_0 = NA_real_,
     pr_gamma2_gt_0 = NA_real_
+    # ,
+    # lr_p_value = NA_real_
   )
 
   d_pars
@@ -109,11 +114,11 @@ do_trial <- function(
   ie <- cumsum(N_c)
 
   if(length(p_thresh_sup) == 1){
-    p_thresh_sup = rep(p_thresh_sup, length(N))
+    p_thresh_sup = rep(p_thresh_sup, K)
   }
 
   if(length(p_thresh_fut) == 1){
-    p_thresh_fut = rep(p_thresh_fut, length(N))
+    p_thresh_fut = rep(p_thresh_fut, K)
   }
 
   # For simplicity just start the follow up clock at the time of birth.
@@ -209,10 +214,14 @@ do_trial <- function(
     if(ii == length(N)){
       # Similarly, add a 1/10th day for the last person so that we can include
       # them in the analysis
+
+      log_debug(" sim ", id_sim, " final analysis ", ii, " N ", nrow(d_c), " max t0 ", max(d_c$t_0))
       d_c[, t_fu := max(d_c$t_0) + 360 - t_0 + 0.1]
     } else {
       # Last enrolment to trigger the interim will have no followup but add
       # a 1/10th day so that we can include them in the analysis.
+
+      log_debug(" sim ", id_sim, " inter analysis ", ii, " N ", nrow(d_c), " max t0 ", max(d_c$t_0))
       d_c[, t_fu := max(d_c$t_0) - t_0 + 0.1]
     }
 
@@ -232,7 +241,16 @@ do_trial <- function(
       format(Sys.time(), format = "%Y%m%d%H%M%S"),
       "-seq-sim", id_sim, "-intrm", ii)
 
+    # lr1 <- survdiff(Surv(t_evt_obs, evt) ~ trt, data = d_c)
 
+
+    # brms::make_stancode(
+    #   t_evt_obs | cens(1-evt) ~ 1, data = d_c, family = brms::brmsfamily("cox")
+    # )
+    #
+    # ld <- brms::make_standata(
+    #   t_evt_obs | cens(1-evt) ~ 1, data = d_c, family = brms::brmsfamily("cox")
+    # )
 
     if(estimation_method == 1){
 
@@ -346,9 +364,11 @@ do_trial <- function(
       rd_360 = mean(d_post$p1_360 - d_post$p0_360),
       pr_drmst_gt_0 = mean((d_rmst$trt1 - d_rmst$trt0)>0),
       pr_gamma2_gt_0 = mean((d_post$gamma2)>0)
+      # ,
+      # lr_p_value = lr1$pvalue
     )]
 
-    # test for superiority and futility conditionss
+    # test for superiority and futility conditions
     if(d_pars[id_analy == ii, pr_drmst_gt_0 > p_thresh_sup[ii]] |
        d_pars[id_analy == ii, pr_drmst_gt_0 < p_thresh_fut[ii]]
     ){
@@ -363,6 +383,7 @@ do_trial <- function(
 
   }
 
+  d_pars
 
   return(
     list(
@@ -373,21 +394,36 @@ do_trial <- function(
 
 }
 
-n_sim <- 1000
-N <- c(2000, 2500, 3000)
-p0 <- 0.1
-p1 <- seq(0.07, 0.1, by = 0.01)
-p_thresh_sup <- 0.95
-p_thresh_fut <- 0.30
+# Works for type i and reasonable power
+# n_sim = 2000,
+# N =  c(2250, 2500, 2750, 3000),
+# N =  c(2100, 2400, 2700, 3000),
+# p0 = 0.1,
+# p1 = seq(0.07, 0.1, by = 0.01),
+# p_thresh_sup = c(0.99, 0.98, 0.98, 0.9725),
+# p_thresh_fut = 0.35
+
+n_sim = 2000
+# N = c(2100, 2400, 2700, 3000)
+N = c(2200, 2400, 2600, 2800)
+p0 = 0.1
+p1 = seq(0.07, 0.1, by = 0.01)
+p_thresh_sup = c(0.99, 0.98, 0.97, 0.97)
+p_thresh_fut = 0.35
+i <- 1
 id_sim <- 1
 estimation_method <- 1
+mcmc_ptcls <- 2000
+
+p1 <- rep(p1, each = n_sim)
+p = c(p0, p1[1])
 
 run_sim_02 <- function(
     n_sim = 2000,
-    N = c(2000, 2250, 2500),
+    N =  c(2200, 2400, 2600, 2800),
     p0 = 0.1,
     p1 = seq(0.07, 0.1, by = 0.01),
-    p_thresh_sup = 0.96,
+    p_thresh_sup = c(0.99, 0.98, 0.98, 0.9725),
     p_thresh_fut = 0.35
 ){
 
@@ -415,8 +451,8 @@ run_sim_02 <- function(
     l_trial <- do_trial(
       id_sim = i, N = N,
       p = c(p0, p1[i]),
-      p_thresh_sup = c(0.99, 0.97, 0.95),
-      p_thresh_fut = c(0.35, 0.35, 0.35),
+      p_thresh_sup = p_thresh_sup,
+      p_thresh_fut = p_thresh_fut,
       estimation_method = 1,
       mcmc_ptcls = 2000
     )
