@@ -2,7 +2,7 @@
 title: "Simulation - RSV study evaluating RSVpreF vs IG"
 subtitle: "Sequential analyses"
 author: "maj"
-date: "2025-04-03"
+date: "2025-04-04"
 date-modified: last-modified
 bibliography: refs.bib
 csl: biomed-central.csl
