@@ -173,6 +173,9 @@ d_sim_res[, rd_360 := nafill(rd_360, type = "locf"), keyby = id_sim]
 d_sim_res[, p0_sim := nafill(p0_sim, type = "locf"), keyby = id_sim]
 d_sim_res[, p1_sim := nafill(p1_sim, type = "locf"), keyby = id_sim]
 d_sim_res[, rd_sim := p1_sim - p0_sim]
+d_sim_res[, scale0 := nafill(scale0, type = "locf"), keyby = id_sim]
+d_sim_res[, scale1 := nafill(scale1, type = "locf"), keyby = id_sim]
+d_sim_res[, shape := nafill(shape, type = "locf"), keyby = id_sim]
 
 p0 <- sort(unique(d_sim_res$p0_sim))
 stopifnot(length(p0) == 1)
@@ -317,6 +320,60 @@ ggplot(
 
 ```
 
+```{r, eval = F}
+#| echo: FALSE
+#| label: fig-cdf-1
+#| fig-cap: 'Cumulative distribution of RSV event based on posterior means'
+#| fig.height: 6
+#| fig.width: 6
+#| fig-pos: H
+#| lightbox: true
+
+
+d_fig <- d_sim_res[, .(id_sim, id_analy, N = N_enrol, rd_sim, scale0, scale1, shape)]
+d_fig <- d_fig[N == 3000]
+
+d_fig <- d_fig[sample(1:nrow(d_fig), size = 400, replace =  F)]
+
+l_surv0 <- lapply(1:nrow(d_fig), function(i){
+  1 / ( 1 + ( 0:360 / d_fig$scale0[i]  )^d_fig$shape[i] )  
+})
+d_fig[, surv0 := l_surv0]
+
+l_surv1 <- lapply(1:nrow(d_fig), function(i){
+  1 / ( 1 + ( 0:360 / d_fig$scale1[i]  )^d_fig$shape[i] )  
+})
+d_fig[, surv1 := l_surv1]
+
+d_fig <- d_fig[, .(surv0 = l_surv0[[1]], surv1 = l_surv1[[1]]), by = .(id_sim, N)]
+d_fig <- melt(d_fig, id.vars = c("id_sim", "N"))
+d_fig[, trt := factor(fifelse(variable == "surv0", 0, 1))]
+d_fig[, t_surv := 0:(.N-1), by = .(id_sim, N, trt)]
+d_fig[, cdf := 1 - value]
+
+d_fig[, grp := paste0(id_sim, ":", N, ":", trt)]
+
+ggplot(d_fig[id_sim == 939], aes(x = t_surv, y = cdf, group = trt)) +
+  geom_line(lwd = 0.3) +
+  # scale_x_continuous("", c(2000, 2500, 3000)) +
+  # scale_y_continuous(
+  #   "Distribution of mean RD", 
+  #   limits = c(-0.08, 0.05), breaks = seq(-0.08, 0.05, by = 0.02)) +
+  theme_minimal() +
+  # theme(
+  #   legend.position = "bottom",
+  #   axis.text.x = element_text(angle = 45, vjust = 1, hjust=1)
+  # ) +
+  # guides(fill=guide_legend(nrow=4)) +
+  facet_wrap(~N, labeller = label_both)
+#+
+  # ggtitle("Distribution of posterior means RD(360) by interim:")
+
+
+
+```
+
+
 @fig-rmst shows the distribution of the posterior means for RMST across the simulations by analysis and risk difference at day 360.
 
 ```{r}
@@ -422,7 +479,7 @@ N_sims <- d_sim_res[id_analy == 1, .N, keyby = .(p1_sim)][, unique(N)]
 ```{r}
 #| echo: FALSE
 #| label: fig-pwr_2
-#| fig-cap: 'Cumulative probability of decision (N = 2500 maximum sample size)'
+#| fig-cap: 'Cumulative probability of decision (N = 2800 maximum sample size)'
 #| fig.height: 6
 #| fig.width: 7
 #| fig-pos: H
