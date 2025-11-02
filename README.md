@@ -1,27 +1,38 @@
 # RSV proposal simulations
 
-Current reference sim is `sim02` 
+Simulation for grant submission CLINICAL TRIALS AND COHORT STUDIES GRANT 2025 Application ID: 2054492 (Snelling).
 
-
-
+Based on evaluation of risk by treatment group using sequential design.
 
 ## Run
 
-E.g.
+For example, using the `sim04` implementation (the one for the grant):
 
 ```
-Rscript --vanilla ./R/sim-02.R run_sim_02 
+Rscript --vanilla ./R/sim04.R run_sim04 ../etc/sim04/cfg-sim04-v01.yml
+```
+
+```
+ $ desc         : chr "Null"
+ $ nsim         : int 1000
+ $ nex          : int 10
+ $ pt_per_day   : num 4.6
+ $ ramp_up_days : int 90
+ $ N_ptcl       : int 10000
+ $ N            : int [1:5] 2000 500 500 500 500
+ $ pr_mv        : num 0.1
+ $ pr_ii        : num 0.1
+ $ prior        :List of 2
+  ..$ pri_a: int 2
+  ..$ pri_b: int 10
+ $ delta        :List of 2
+  ..$ sup: int 0
+  ..$ fut: num -0.01
+ $ thresh       :List of 2
+  ..$ sup: num 0.99
+  ..$ fut: num 0.7
+ $ print_summary: int 1
 ```
 
 
-## Grant text
 
-The primary analysis will be based on a sequential design that evaluates the time to occurrence of RSV by treatment group. 
-Analyses will start after 2100 enrolments and be run after every 300 subsequent participants. 
-The maximum sample size targets 3000 enrolments, which will be analysed after the 360 day follow up is complete. 
-Inference will be based on a Bayesian accelerated failure time model under weakly regularising priors to estimate and compare restricted mean survival time to day 360. 
-Decision rules are specified to stop enrolment for superiority and futility. 
-
-
-
-Initial simulation work has calibrated the design to use a 99% probability threshold applied to the posterior difference in RMST at the first analysis, falling to 97.25% at the final analysis. Futility is calibrated to use a decision threshold of 35% throughout. Under this setup with a baseline cumulative incidence of 10% at 360 days and 7% in the treatment group, the cumulative probability of declaring superiority is greater than 80% by the maximum sample size. Under the null scenario, the type-i assertion probability is controlled at less than 5% and the probability of declaring futility at the first analysis is greater than 35%. Missingness and the existence of competing risks are expected to be negligible and will therefore be handled through censoring. Further simulation will explore variations to the design and sensitivity options with a focus on efficiency and robustness to misspecification. 
