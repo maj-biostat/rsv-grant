@@ -1,38 +1,29 @@
-# Command line arguments list scenario (true dose response),
-# the number of simulations to run, the number of cores
-# to use and the simulator to use.
+
+source("./R/init.R")
+source("./R/data.R")
+
 args = commandArgs(trailingOnly=TRUE)
-
-suppressPackageStartupMessages(library("logger"))
-
-f_log <- file.path("log.txt")
-log_appender(appender_file(f_log))
-# message(Sys.time(), " Log file initialised ", f_log)
-log_info("*** START UP ***")
-
-log_threshold(INFO)
-# log_threshold(DEBUG)
-
-suppressWarnings(suppressPackageStartupMessages(library(cmdstanr)))
-library(ggplot2)
-library(parallel)
-library(mcprogress)
-suppressWarnings(suppressPackageStartupMessages(library(tictoc)))
-library(poisson)
-library(data.table)
-library(survival)
-library(flexsurv)
-library(mvnfast)
 
 # Load cfg based on cmd line args.
 if (length(args)<1) {
   log_info("Setting default run method (does nothing)")
-  args[1] = "run_none_sim_02"
+  args[1] = "run_none_sim02"
+  args[2] = "./sim02/cfg-sim02-v01.yml"
 } else {
   log_info("Run method ", args[1])
+  log_info("Scenario config ", args[2])
 }
 
-tic()
+# Log setup
+f_log_sim <- file.path("./logs", "log-sim04.txt")
+log_appender(appender_file(f_log_sim))
+log_info("*** START UP ***")
+
+f_cfgsc <- file.path("./etc", args[2])
+g_cfgsc <- config::get(file = f_cfgsc)
+stopifnot("Config is null" = !is.null(g_cfgsc))
+
+ix <- 1
 
 set.seed(4682467)
 
@@ -90,25 +81,29 @@ integrand_surv <- function(x, mu, shape) {
 # # p_0, p_1
 # p = c(0.1, 0.07)
 
-do_trial <- function(
-    id_sim = 1,
-    N = c(1500, 2000, 2500, 3000),
-    # probability of event by day 360
-    p = c(0.1, 0.07),
-    p_thresh_sup = 0.95,
-    p_thresh_fut = 0.30,
-    # 1 = flexsurvreg, 2 = pathfinder, 3 = mcmc
-    estimation_method = 1,
-    mcmc_ptcls = 1000
+run_trial <- function(
+    ix,
+    l_spec
+
+    # id_sim = 1,
+    # N = c(2000, 2500, 3000, 3500, 4000),
+    # # probability of event by day 360
+    # p = c(0.1, 0.07),
+    # p_thresh_sup = 0.95,
+    # p_thresh_fut = 0.30,
+    # # 1 = flexsurvreg, 2 = pathfinder, 3 = mcmc
+    # estimation_method = 1,
+    # mcmc_ptcls = 1000
 ){
 
   log_info(paste0(match.call()[[1]]), " sim ", id_sim)
 
-  # Number of analyses (will always be 2, but anyway)
-  K <- length(N)
-  N_tot <- max(N)
+  # Number of analyses
+  K <- length(l_spec$N)
+  N_tot <- sum(l_spec$N)
   # Cohorts
-  N_c <- c(N[1], diff(N))
+  N_c <- l_spec$N
+
   # Start and end indexes
   is <- c(0, cumsum(N_c)[-length(N_c)]) + 1
   ie <- cumsum(N_c)
@@ -394,6 +389,9 @@ do_trial <- function(
 
 }
 
+
+
+
 # Works for type i and reasonable power
 # n_sim = 2000,
 # N =  c(2250, 2500, 2750, 3000),
@@ -418,13 +416,13 @@ mcmc_ptcls <- 2000
 p1 <- rep(p1, each = n_sim)
 p = c(p0, p1[1])
 
-run_sim_02 <- function(
-    n_sim = 2000,
-    N =  c(2200, 2400, 2600, 2800),
-    p0 = 0.1,
-    p1 = seq(0.07, 0.1, by = 0.01),
-    p_thresh_sup = c(0.99, 0.98, 0.98, 0.9725),
-    p_thresh_fut = 0.35
+run_sim02 <- function(
+    # n_sim = 2000,
+    # N =  c(2200, 2400, 2600, 2800),
+    # p0 = 0.1,
+    # p1 = seq(0.07, 0.1, by = 0.01),
+    # p_thresh_sup = c(0.99, 0.98, 0.98, 0.9725),
+    # p_thresh_fut = 0.35
 ){
 
   log_info(paste0(match.call()[[1]]))
@@ -434,7 +432,60 @@ run_sim_02 <- function(
     mc_cores <- 5
   }
 
-  l_res <- list()
+  l_spec <- list()
+  l_spec$desc <- g_cfgsc$desc
+  l_spec$nsim <- g_cfgsc$nsim
+  # l_spec$nex <- g_cfgsc$nex
+
+  l_spec$pt_per_day <- g_cfgsc$pt_per_day
+  l_spec$ramp_up_days <- g_cfgsc$ramp_up_days
+
+  l_spec$N_ptcl <- g_cfgsc$N_ptcl
+
+  l_spec$N <- g_cfgsc$N_pt
+
+  # Think in terms of a nominal sample size.
+  # If you were thinking of a sample size that is around 4000 and rand was 1:1
+  # then if pr_mv = 0.1 and pr_ii = 0.07, the expected event count would be
+  # 4000 * 0.5 * 0.1 + 4000 * 0.5 * 0.07 = 340
+  l_spec$pr_mv <- g_cfgsc$pr_mv
+  l_spec$pr_ii <- g_cfgsc$pr_ii
+
+  l_spec$prior$pri_a <- g_cfgsc$pri_a
+  l_spec$prior$pri_b <- g_cfgsc$pri_b
+
+  l_spec$delta$sup <- g_cfgsc$dec_delta_sup
+  l_spec$thresh$sup <- g_cfgsc$dec_thresh_sup
+
+  l_spec$delta$fut <- g_cfgsc$dec_delta_fut
+  l_spec$thresh$fut <- g_cfgsc$dec_thresh_fut
+
+  l_spec$print_c_prob <- g_cfgsc$print_c_prob
+
+  e = NULL
+  ix <- 1
+
+  r <- pbapply::pblapply(
+    X=1:g_cfgsc$nsim, cl = g_cfgsc$mc_cores, FUN=function(ix) {
+      log_info("Simulation ", ix);
+
+      ll <- tryCatch({
+        run_trial(
+          ix,
+          l_spec
+        )
+      },
+      error=function(e) {
+        log_info("ERROR in pblapply LOOP (see terminal output):")
+        message(" ERROR in pblapply LOOP " , e);
+        log_info("Traceback (see terminal output):")
+        message(traceback())
+        stop(paste0("Stopping with error ", e))
+      })
+
+      ll
+    })
+
 
   # repeat each of the elements in p1 n_sim times
   # we will smooth over the true effect size, but we need some way to
@@ -473,14 +524,14 @@ run_sim_02 <- function(
 }
 
 
-run_none_sim_02 <- function(){
-  log_info("run_none_sim_05: Nothing doing here bud.")
+run_none_sim02 <- function(){
+  log_info("run_none_sim02: Nothing doing here bud.")
 }
 
-main_sim_02 <- function(){
+main_sim02 <- function(){
   funcname <- paste0(args[1], "()")
   log_info("Main, invoking ", funcname)
   eval(parse(text=funcname))
 }
 
-main_sim_02()
+main_sim02()
